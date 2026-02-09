@@ -1,0 +1,21 @@
+[package]
+title = "Navigation Map Generator"
+description = "Generates navigation maps from Isaac Sim scenes using orthographic capture and occupancy grid extraction."
+category = "utility"
+version = "0.1.0"
+authors = ["khemoo"]
+readme = "docs/README.md"
+repository = ""
+keywords = ["isaac", "navigation", "map", "orthographic", "occupancy", "capture"]
+writeTarget.kit = true
+
+[dependencies]
+"isaacsim.gui.components" = {}
+"omni.kit.menu.utils" = {}
+"omni.replicator.core" = {}
+"omni.ui" = {}
+"omni.usd" = {}
+
+[[python.module]]
+name = "khemoo.util.navigation_map"
+
