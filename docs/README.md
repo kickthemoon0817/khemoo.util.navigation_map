@@ -71,8 +71,8 @@ khemoo.util.navigation_map/
 ├── config/
 │   └── extension.toml          # Extension manifest and dependencies
 ├── docs/
-│   └── README.md               # This file
-├── VERSION.md                  # Version history
+│   ├── README.md               # This file
+│   └── VERSION.md              # Version history
 └── khemoo/util/navigation_map/
     ├── __init__.py              # Public API exports
     └── impl/
