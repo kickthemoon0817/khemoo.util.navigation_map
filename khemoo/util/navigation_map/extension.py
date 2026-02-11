@@ -12,8 +12,8 @@ from isaacsim.gui.components.element_wrappers import ScrollingWindow
 from isaacsim.gui.components.menu import make_menu_item_description
 from omni.kit.menu.utils import MenuItemDescription, add_menu_items, remove_menu_items
 
-from .ortho_capture import OrthoMapCapture
-from .ortho_config import BoundaryRegion, OrthoMapConfig
+from .impl.ortho_capture import OrthoMapCapture
+from .impl.ortho_config import BoundaryRegion, OrthoMapConfig
 from .ui_builder import NavigationMapUIBuilder
 
 EXTENSION_TITLE = "Navigation Map Generator"
