@@ -75,12 +75,12 @@ khemoo.util.navigation_map/
 │   └── VERSION.md              # Version history
 └── khemoo/util/navigation_map/
     ├── __init__.py              # Public API exports
+    ├── extension.py             # NavigationMapExtension — Kit entry point
+    ├── ui_builder.py            # NavigationMapUIBuilder — UI widget construction
     └── impl/
         ├── __init__.py
         ├── ortho_config.py      # Frozen dataclasses: BoundaryRegion, TileGrid, OrthoMapConfig
-        ├── ortho_capture.py     # OrthoMapCapture — camera creation + tiled rendering
-        ├── ui_builder.py        # NavigationMapUIBuilder — UI widget construction
-        └── extension.py         # NavigationMapExtension — Kit entry point
+        └── ortho_capture.py     # OrthoMapCapture — camera creation + tiled rendering
 ```
 
 ### Module Responsibilities
