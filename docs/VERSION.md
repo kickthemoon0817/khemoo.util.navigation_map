@@ -1,5 +1,31 @@
 # Version History
 
+## v0.2.0 — 2026-02-12
+
+Integrated `isaacsim.asset.gen.omap` occupancy map generation into the extension.
+
+### Features
+
+- **Occupancy map generation** — 2D occupancy grid via PhysX raycasting with PNG + ROS YAML output
+- **Unified area definition** — Shared origin, bounds, and cell size for both orthographic and occupancy map workflows
+- **Positioning helpers** — "Center to Selection" and "Bound Selection" buttons to set area from selected prims
+- **Rigid body handling** — Anonymous session layer strips RigidBodyAPI from prims during mesh collision generation, leaving the stage untouched
+- **Exact ROS origin** — YAML output uses user-specified origin coordinates instead of grid-aligned computed origin
+- **Separate action buttons** — Create Camera, Capture Orthographic Map, Generate Occupancy Map are independent
+
+### New Files
+
+- `impl/omap_config.py` — Frozen `OmapConfig` dataclass with origin, bounds, cell size, and output settings
+- `impl/omap_capture.py` — `OmapCapture` engine with PhysX collision and mesh collision generation paths
+
+### Modified Files
+
+- `config/extension.toml` — Added dependencies for omap, physx, timeline, layers, core utils
+- `ui_builder.py` — Redesigned with Area Definition, Orthographic Settings, Occupancy Map Settings sections
+- `extension.py` — Wires both `OrthoMapCapture` and `OmapCapture` engines to the unified UI
+
+---
+
 ## v0.1.0 — 2026-02-09
 
 Initial release. Migrated orthographic capture from `isaacsim.util.ortho_capture` and redesigned following AGENTS.md coding standards.
