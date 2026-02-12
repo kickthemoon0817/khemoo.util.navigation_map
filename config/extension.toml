@@ -10,9 +10,14 @@ keywords = ["isaac", "navigation", "map", "orthographic", "occupancy", "capture"
 writeTarget.kit = true
 
 [dependencies]
+"isaacsim.asset.gen.omap" = {}
+"isaacsim.core.utils" = {}
 "isaacsim.gui.components" = {}
 "omni.kit.menu.utils" = {}
+"omni.kit.usd.layers" = {}
+"omni.physx" = {}
 "omni.replicator.core" = {}
+"omni.timeline" = {}
 "omni.ui" = {}
 "omni.usd" = {}
 

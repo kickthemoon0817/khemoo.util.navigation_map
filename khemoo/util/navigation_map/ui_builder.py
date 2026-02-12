@@ -1,24 +1,43 @@
 from __future__ import annotations
 
 import os
-from typing import Callable, Optional
+from typing import Callable
 
 import omni.ui as ui
+import omni.usd
 from isaacsim.gui.components.style import get_style
-from isaacsim.gui.components.ui_utils import btn_builder, float_builder, str_builder
+from isaacsim.gui.components.ui_utils import (
+    btn_builder,
+    cb_builder,
+    float_builder,
+    multi_btn_builder,
+    str_builder,
+    xyz_builder,
+)
+from pxr import Gf, Usd, UsdGeom
 
 
 class NavigationMapUIBuilder:
     """
-    Builds the Omni.UI panel for the Navigation Map Generator extension.
+    Builds the unified Omni.UI panel for the Navigation Map Generator extension.
 
-    This class owns all UI widget models and layout logic. It does not
-    perform any capture or camera operations itself — those are delegated
-    to callbacks provided by the extension.
+    Provides a shared Area Definition section (origin, bounds, cell size,
+    positioning helpers) used by both the orthographic capture and the
+    occupancy map generation workflows.  Separate action buttons let the
+    user trigger each operation independently.
+
+    This class owns all UI widget models and layout logic.  It does not
+    perform any capture or generation itself — those are delegated to
+    callbacks provided by the extension.
     """
 
     def __init__(self) -> None:
         self._models: dict[str, ui.AbstractValueModel] = {}
+        self._prev_origin: list[float] = [0.0, 0.0]
+        self._lower_bound: list[float] = [-1.0, -1.0]
+        self._upper_bound: list[float] = [1.0, 1.0]
+        self._wait_bound_update: bool = False
+        self._bound_update_case: int = 0
 
     @property
     def models(self) -> dict[str, ui.AbstractValueModel]:
@@ -29,50 +48,105 @@ class NavigationMapUIBuilder:
         self,
         frame: ui.Frame,
         on_create_camera: Callable[[], None],
-        on_capture: Callable[[], None],
+        on_capture_ortho: Callable[[], None],
+        on_generate_omap: Callable[[], None],
     ) -> None:
         """
         Construct the full UI inside the given frame.
 
         Args:
             frame: The parent UI frame to build widgets into.
-            on_create_camera: Callback invoked when the user clicks "Create Camera".
-            on_capture: Callback invoked when the user clicks "Capture".
+            on_create_camera: Callback for the "Create Camera" button.
+            on_capture_ortho: Callback for the "Capture Orthographic Map" button.
+            on_generate_omap: Callback for the "Generate Occupancy Map" button.
         """
         with frame:
             with ui.VStack(spacing=5, height=0, style=get_style()):
-                self._build_boundary_section()
-                self._build_camera_section()
+                self._build_area_section()
+                self._build_ortho_section()
+                self._build_omap_section()
                 self._build_output_section()
 
                 ui.Spacer(height=10)
                 btn_builder(
                     label="Create Camera",
                     text="CREATE CAMERA",
-                    tooltip="Create orthographic camera based on settings",
+                    tooltip="Create orthographic camera based on area and camera settings",
                     on_clicked_fn=on_create_camera,
                 )
                 ui.Spacer(height=5)
                 btn_builder(
-                    label="Capture Image",
-                    text="CAPTURE",
-                    tooltip="Capture navigation map from the orthographic camera",
-                    on_clicked_fn=on_capture,
+                    label="Ortho Capture",
+                    text="CAPTURE ORTHOGRAPHIC MAP",
+                    tooltip="Capture a top-down orthographic image of the defined area",
+                    on_clicked_fn=on_capture_ortho,
                 )
+                ui.Spacer(height=5)
+                btn_builder(
+                    label="Omap Generate",
+                    text="GENERATE OCCUPANCY MAP",
+                    tooltip="Generate a 2D occupancy map using PhysX raycasting",
+                    on_clicked_fn=on_generate_omap,
+                )
+
+    # ------------------------------------------------------------------
+    # Public getters — Area Definition
+    # ------------------------------------------------------------------
+
+    def get_origin(self) -> tuple[float, float, float]:
+        """
+        Read the origin XYZ from the UI.
+
+        Returns:
+            Tuple of (x, y, z).
+        """
+        return (
+            self._models["origin"][0].get_value_as_float(),
+            self._models["origin"][1].get_value_as_float(),
+            self._models["origin"][2].get_value_as_float(),
+        )
+
+    def get_lower_bound(self) -> tuple[float, float, float]:
+        """
+        Read the lower bound XYZ from the UI.
+
+        Returns:
+            Tuple of (x, y, z).
+        """
+        return (
+            self._lower_bound[0],
+            self._lower_bound[1],
+            self._models["lower_bound"][2].get_value_as_float(),
+        )
+
+    def get_upper_bound(self) -> tuple[float, float, float]:
+        """
+        Read the upper bound XYZ from the UI.
+
+        Returns:
+            Tuple of (x, y, z).
+        """
+        return (
+            self._upper_bound[0],
+            self._upper_bound[1],
+            self._models["upper_bound"][2].get_value_as_float(),
+        )
 
     def get_boundary_values(self) -> tuple[float, float, float, float]:
         """
-        Read the current boundary coordinate values from the UI.
+        Derive ortho-capture boundary from origin + bounds.
 
         Returns:
-            Tuple of (x_min, x_max, y_min, y_max).
+            Tuple of (x_min, x_max, y_min, y_max) in world coordinates.
         """
-        return (
-            self._models["x_min"].get_value_as_float(),
-            self._models["x_max"].get_value_as_float(),
-            self._models["y_min"].get_value_as_float(),
-            self._models["y_max"].get_value_as_float(),
-        )
+        ox, oy, _ = self.get_origin()
+        lb = self.get_lower_bound()
+        ub = self.get_upper_bound()
+        return (ox + lb[0], ox + ub[0], oy + lb[1], oy + ub[1])
+
+    def get_cell_size(self) -> float:
+        """Read the cell size from the UI."""
+        return self._models["cell_size"].get_value_as_float()
 
     def get_camera_height(self) -> float:
         """Read the camera Z height from the UI."""
@@ -90,21 +164,64 @@ class NavigationMapUIBuilder:
         """Read the output directory path from the UI."""
         return self._models["output_dir"].get_value_as_string()
 
-    def _build_boundary_section(self) -> None:
-        """Build the Boundary Coordinates collapsable frame."""
-        with ui.CollapsableFrame(title="Boundary Coordinates", style=get_style(), collapsed=False):
-            with ui.VStack(spacing=2, height=0):
-                self._models["x_min"] = float_builder("X Min", default_val=-10.0, tooltip="Minimum X coordinate")
-                self._models["x_max"] = float_builder("X Max", default_val=10.0, tooltip="Maximum X coordinate")
-                self._models["y_min"] = float_builder("Y Min", default_val=-10.0, tooltip="Minimum Y coordinate")
-                self._models["y_max"] = float_builder("Y Max", default_val=10.0, tooltip="Maximum Y coordinate")
+    def get_use_physx_geometry(self) -> bool:
+        """Read the PhysX geometry checkbox state from the UI."""
+        return self._models["physx_geom"].get_value_as_bool()
 
-    def _build_camera_section(self) -> None:
-        """Build the Camera Settings collapsable frame."""
-        with ui.CollapsableFrame(title="Camera Settings", style=get_style(), collapsed=False):
+    # ------------------------------------------------------------------
+    # UI section builders
+    # ------------------------------------------------------------------
+
+    def _build_area_section(self) -> None:
+        """Build the Area Definition collapsable frame with origin, bounds, and positioning."""
+        with ui.CollapsableFrame(title="Area Definition", style=get_style(), collapsed=False):
+            with ui.VStack(spacing=2, height=0):
+                self._models["origin"] = xyz_builder(
+                    label="Origin",
+                    on_value_changed_fn=[
+                        self._on_area_value_changed,
+                        self._on_area_value_changed,
+                        self._on_area_value_changed,
+                    ],
+                )
+                self._models["lower_bound"] = xyz_builder(
+                    label="Lower Bound",
+                    default_val=[self._lower_bound[0], self._lower_bound[1], 0.0],
+                    on_value_changed_fn=[
+                        self._on_area_value_changed,
+                        self._on_area_value_changed,
+                        self._on_area_value_changed,
+                    ],
+                )
+                self._models["upper_bound"] = xyz_builder(
+                    label="Upper Bound",
+                    default_val=[self._upper_bound[0], self._upper_bound[1], 0.0],
+                    on_value_changed_fn=[
+                        self._on_area_value_changed,
+                        self._on_area_value_changed,
+                        self._on_area_value_changed,
+                    ],
+                )
+                self._models["center_bound"] = multi_btn_builder(
+                    "Positioning",
+                    text=["Center to Selection", "Bound Selection"],
+                    on_clicked_fn=[self._on_center_selection, self._on_bound_selection],
+                )
+                self._models["cell_size"] = float_builder(
+                    label="Cell Size",
+                    default_val=0.05,
+                    min=0.001,
+                    step=0.001,
+                    format="%.3f",
+                    tooltip="Cell size in stage units for occupancy map resolution",
+                )
+
+    def _build_ortho_section(self) -> None:
+        """Build the Orthographic Settings collapsable frame."""
+        with ui.CollapsableFrame(title="Orthographic Settings", style=get_style(), collapsed=False):
             with ui.VStack(spacing=2, height=0):
                 self._models["z_height"] = float_builder(
-                    "Z Height", default_val=50.0, tooltip="Camera height above the scene"
+                    "Z Height", default_val=50.0, tooltip="Camera height above the scene",
                 )
                 self._models["meters_per_pixel"] = float_builder(
                     "Meters per Pixel", default_val=0.01,
@@ -115,6 +232,20 @@ class NavigationMapUIBuilder:
                     tooltip="USD path for the orthographic camera",
                 )
 
+    def _build_omap_section(self) -> None:
+        """Build the Occupancy Map Settings collapsable frame."""
+        with ui.CollapsableFrame(title="Occupancy Map Settings", style=get_style(), collapsed=False):
+            with ui.VStack(spacing=2, height=0):
+                self._models["physx_geom"] = cb_builder(
+                    "Use PhysX Collision Geometry",
+                    tooltip=(
+                        "If True, current collision approximations are used. "
+                        "If False, original USD meshes are used with RigidBody removal."
+                    ),
+                    on_clicked_fn=None,
+                    default_val=True,
+                )
+
     def _build_output_section(self) -> None:
         """Build the Output Settings collapsable frame."""
         with ui.CollapsableFrame(title="Output Settings", style=get_style(), collapsed=False):
@@ -122,7 +253,122 @@ class NavigationMapUIBuilder:
                 self._models["output_dir"] = str_builder(
                     "Output Directory",
                     default_val=os.path.expanduser("~/navigation_maps"),
-                    tooltip="Directory to save captured navigation maps",
+                    tooltip="Directory to save captured images and YAML files",
                     use_folder_picker=True,
                 )
 
+    # ------------------------------------------------------------------
+    # Positioning callbacks (ported from omap UI)
+    # ------------------------------------------------------------------
+
+    def _on_area_value_changed(self, _value: float) -> None:
+        """Sync internal bound tracking when any area field changes."""
+        lb_x = self._models["lower_bound"][0].get_value_as_float()
+        lb_y = self._models["lower_bound"][1].get_value_as_float()
+        ub_x = self._models["upper_bound"][0].get_value_as_float()
+        ub_y = self._models["upper_bound"][1].get_value_as_float()
+
+        if lb_x >= ub_x or lb_y >= ub_y:
+            return
+
+        if self._wait_bound_update:
+            if self._bound_update_case == 0:
+                self._lower_bound[0] = lb_x
+            elif self._bound_update_case == 1:
+                self._lower_bound[1] = lb_y
+            elif self._bound_update_case == 2:
+                self._upper_bound[0] = ub_x
+            elif self._bound_update_case == 3:
+                self._upper_bound[1] = ub_y
+        else:
+            self._lower_bound[0] = lb_x
+            self._lower_bound[1] = lb_y
+            self._upper_bound[0] = ub_x
+            self._upper_bound[1] = ub_y
+
+    def _on_center_selection(self) -> None:
+        """Center the origin on the selected prims and adjust bounds to match."""
+        origin = self._calculate_bounds(origin_calc=True, stationary_bounds=True)
+        self._models["origin"][0].set_value(origin[0])
+        self._models["origin"][1].set_value(origin[1])
+
+        result = self._calculate_bounds(origin_calc=False, stationary_bounds=True)
+        self._lower_bound, self._upper_bound = result[0], result[1]
+        self._set_bound_values_in_ui()
+
+    def _on_bound_selection(self) -> None:
+        """Set bounds from the bounding box of selected prims."""
+        result = self._calculate_bounds(origin_calc=False, stationary_bounds=False)
+        self._lower_bound, self._upper_bound = result[0], result[1]
+        self._set_bound_values_in_ui()
+
+    def _set_bound_values_in_ui(self) -> None:
+        """Push internal bound values into the UI widgets with change-guard."""
+        self._wait_bound_update = True
+        self._bound_update_case = 0
+        self._models["lower_bound"][0].set_value(self._lower_bound[0])
+        self._bound_update_case += 1
+        self._models["lower_bound"][1].set_value(self._lower_bound[1])
+        self._bound_update_case += 1
+        self._models["upper_bound"][0].set_value(self._upper_bound[0])
+        self._bound_update_case += 1
+        self._models["upper_bound"][1].set_value(self._upper_bound[1])
+        self._wait_bound_update = False
+
+    def _calculate_bounds(
+        self, origin_calc: bool, stationary_bounds: bool,
+    ) -> list[float] | tuple[list[float], list[float]]:
+        """
+        Compute origin or bounds from the current prim selection.
+
+        Args:
+            origin_calc: If True, return the midpoint as the new origin.
+            stationary_bounds: If True, adjust bounds relative to origin shift.
+
+        Returns:
+            Origin as [x, y] when origin_calc is True, otherwise a tuple
+            of (lower_bound, upper_bound) each as [x, y].
+        """
+        origin_xy = [
+            self._models["origin"][0].get_value_as_float(),
+            self._models["origin"][1].get_value_as_float(),
+        ]
+
+        if not origin_calc and stationary_bounds:
+            lower = [
+                self._lower_bound[0] + self._prev_origin[0] - origin_xy[0],
+                self._lower_bound[1] + self._prev_origin[1] - origin_xy[1],
+            ]
+            upper = [
+                self._upper_bound[0] + self._prev_origin[0] - origin_xy[0],
+                self._upper_bound[1] + self._prev_origin[1] - origin_xy[1],
+            ]
+            return lower, upper
+
+        selected_paths = omni.usd.get_context().get_selection().get_selected_prim_paths()
+        stage = omni.usd.get_context().get_stage()
+        bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), includedPurposes=[UsdGeom.Tokens.default_])
+        bbox_cache.Clear()
+        total_bbox = Gf.BBox3d()
+
+        if len(selected_paths) > 0:
+            for prim_path in selected_paths:
+                prim = stage.GetPrimAtPath(prim_path)
+                bounds = bbox_cache.ComputeWorldBound(prim)
+                total_bbox = Gf.BBox3d.Combine(total_bbox, Gf.BBox3d(bounds.ComputeAlignedRange()))
+            box_range = total_bbox.GetBox()
+
+            if origin_calc:
+                mid = box_range.GetMidpoint()
+                self._prev_origin = list(origin_xy)
+                return [mid[0], mid[1]]
+
+            min_pt = box_range.GetMin()
+            max_pt = box_range.GetMax()
+            lower = [min_pt[0] - origin_xy[0], min_pt[1] - origin_xy[1]]
+            upper = [max_pt[0] - origin_xy[0], max_pt[1] - origin_xy[1]]
+            return lower, upper
+
+        if origin_calc:
+            return [0.0, 0.0]
+        return [0.0, 0.0], [0.0, 0.0]
