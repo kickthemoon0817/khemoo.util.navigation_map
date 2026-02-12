@@ -12,6 +12,8 @@ from isaacsim.gui.components.element_wrappers import ScrollingWindow
 from isaacsim.gui.components.menu import make_menu_item_description
 from omni.kit.menu.utils import MenuItemDescription, add_menu_items, remove_menu_items
 
+from .impl.omap_capture import OmapCapture
+from .impl.omap_config import OmapConfig
 from .impl.ortho_capture import OrthoMapCapture
 from .impl.ortho_config import BoundaryRegion, OrthoMapConfig
 from .ui_builder import NavigationMapUIBuilder
@@ -21,11 +23,12 @@ EXTENSION_TITLE = "Navigation Map Generator"
 
 class NavigationMapExtension(omni.ext.IExt):
     """
-    Extension entry-point that wires the OrthoMapCapture engine
-    into an Omni.UI panel accessible from the Tools menu.
+    Extension entry-point that wires the OrthoMapCapture and OmapCapture
+    engines into a unified Omni.UI panel accessible from the Tools menu.
 
     This class is intentionally thin — it delegates capture logic to
-    OrthoMapCapture and UI construction to NavigationMapUIBuilder.
+    OrthoMapCapture / OmapCapture and UI construction to
+    NavigationMapUIBuilder.
     """
 
     def __init__(self) -> None:
@@ -34,6 +37,7 @@ class NavigationMapExtension(omni.ext.IExt):
         self._window: Optional[ScrollingWindow] = None
         self._menu_items: list[MenuItemDescription] = []
         self._capture_engine: Optional[OrthoMapCapture] = None
+        self._omap_engine: Optional[OmapCapture] = None
         self._ui_builder: NavigationMapUIBuilder = NavigationMapUIBuilder()
 
     def on_startup(self, ext_id: str) -> None:
@@ -45,9 +49,10 @@ class NavigationMapExtension(omni.ext.IExt):
         """
         self._ext_id = ext_id
         self._capture_engine = OrthoMapCapture()
+        self._omap_engine = OmapCapture()
 
         self._window = ScrollingWindow(
-            title=EXTENSION_TITLE, width=450, height=500, visible=False,
+            title=EXTENSION_TITLE, width=450, height=600, visible=False,
             dockPreference=ui.DockPreference.LEFT_BOTTOM,
         )
         self._window.set_visibility_changed_fn(self._on_window_visibility_changed)
@@ -70,6 +75,10 @@ class NavigationMapExtension(omni.ext.IExt):
             self._capture_engine.destroy()
             self._capture_engine = None
 
+        if self._omap_engine is not None:
+            self._omap_engine.destroy()
+            self._omap_engine = None
+
         if self._menu_items:
             remove_menu_items(self._menu_items, "Tools")
             self._menu_items = []
@@ -84,7 +93,8 @@ class NavigationMapExtension(omni.ext.IExt):
             self._ui_builder.build(
                 frame=self._window.frame,
                 on_create_camera=self._on_create_camera,
-                on_capture=self._on_capture,
+                on_capture_ortho=self._on_capture_ortho,
+                on_generate_omap=self._on_generate_omap,
             )
 
     def _toggle_window(self) -> None:
@@ -109,10 +119,29 @@ class NavigationMapExtension(omni.ext.IExt):
         )
         self._capture_engine.create_camera(config)
 
-    def _on_capture(self) -> None:
-        """Kick off the async tiled capture."""
+    def _on_capture_ortho(self) -> None:
+        """Kick off the async orthographic tiled capture."""
         if not self._capture_engine.is_ready:
             carb.log_warn("No camera created. Please create a camera first.")
             return
         asyncio.ensure_future(self._capture_engine.capture_async())
+
+    def _on_generate_omap(self) -> None:
+        """Kick off the async occupancy map generation."""
+        origin = self._ui_builder.get_origin()
+        lower_bound = self._ui_builder.get_lower_bound()
+        upper_bound = self._ui_builder.get_upper_bound()
+        cell_size = self._ui_builder.get_cell_size()
+        use_physx_geom = self._ui_builder.get_use_physx_geometry()
+        output_dir = self._ui_builder.get_output_directory()
+
+        config = OmapConfig(
+            origin=origin,
+            lower_bound=lower_bound,
+            upper_bound=upper_bound,
+            cell_size=cell_size,
+            use_physx_geometry=use_physx_geom,
+            output_directory=output_dir,
+        )
+        asyncio.ensure_future(self._omap_engine.generate_async(config))
 
