@@ -61,15 +61,6 @@ class OmapCapture:
             carb.log_error("No USD stage available for omap generation.")
             return None
 
-        physx_interface = omni.physx.get_physx_interface()
-        stage_id = context.get_stage_id()
-        self._generator = _omap.Generator(physx_interface, stage_id)
-
-        self._generator.update_settings(config.cell_size, 1.0, 0.0, 0.5)
-        self._generator.set_transform(
-            config.origin, config.lower_bound, config.upper_bound,
-        )
-
         timeline = omni.timeline.get_timeline_interface()
         app = omni.kit.app.get_app()
 
@@ -123,6 +114,17 @@ class OmapCapture:
             await app.next_update_async()
 
         timeline.play()
+        for _ in range(5):
+            await app.next_update_async()
+
+        context = omni.usd.get_context()
+        physx_interface = omni.physx.get_physx_interface()
+        self._generator = _omap.Generator(physx_interface, context.get_stage_id())
+        self._generator.update_settings(config.cell_size, 1.0, 0.0, 0.5)
+        self._generator.set_transform(
+            config.origin, config.lower_bound, config.upper_bound,
+        )
+
         await app.next_update_async()
         self._generator.generate2d()
         await app.next_update_async()
@@ -211,6 +213,17 @@ class OmapCapture:
                         UsdPhysics.MeshCollisionAPI.Apply(prim)
 
         timeline.play()
+        for _ in range(5):
+            await app.next_update_async()
+
+        context = omni.usd.get_context()
+        physx_interface = omni.physx.get_physx_interface()
+        self._generator = _omap.Generator(physx_interface, context.get_stage_id())
+        self._generator.update_settings(config.cell_size, 1.0, 0.0, 0.5)
+        self._generator.set_transform(
+            config.origin, config.lower_bound, config.upper_bound,
+        )
+
         await app.next_update_async()
         self._generator.generate2d()
         await app.next_update_async()
@@ -309,11 +322,18 @@ class OmapCapture:
         """
         Identify occupied cells caused only by steep terrain, not real obstacles.
 
-        For every occupied cell, a downward ray is cast from well above the map
-        ceiling.  If the ray hits a surface whose slope angle (relative to the
-        world Z-up vector) is **less than** ``max_traversable_slope_degrees``,
-        that cell is considered traversable ground and will be reclassified as
-        free space.
+        For every occupied cell a two-stage check is performed:
+
+        1. **Slope check** — a downward ray from above the map ceiling.  If
+           the slope angle of the first surface hit (relative to world Z-up) is
+           ≥ ``max_traversable_slope_degrees``, the cell stays occupied.
+        2. **Thickness check** — an upward ray from below the map floor.  The
+           vertical distance between the top-hit and bottom-hit gives the
+           object thickness at that XY position.  If the thickness exceeds
+           ``cell_size * 5`` the cell is treated as a solid obstacle (wall,
+           box, etc.) and stays occupied.
+
+        Only cells that pass *both* checks are reclassified as free space.
 
         Must be called **while the PhysX timeline is still playing** so that
         the scene query interface has an active scene.
@@ -328,6 +348,7 @@ class OmapCapture:
         dims = self._generator.get_dimensions()
         buffer = np.array(self._generator.get_buffer(), dtype=np.float32)
         min_bound = self._generator.get_min_bound()
+        lower_bound_z: float = config.origin[2] + config.lower_bound[2]
         upper_bound_z: float = config.origin[2] + config.upper_bound[2]
         cell_size: float = config.cell_size
         threshold_rad: float = math.radians(config.max_traversable_slope_degrees)
@@ -336,12 +357,15 @@ class OmapCapture:
         slope_free: np.ndarray = np.zeros(total_cells, dtype=bool)
 
         scene_query = get_physx_scene_query_interface()
-        ray_start_z: float = upper_bound_z + 10.0
-        ray_distance: float = ray_start_z - (config.origin[2] + config.lower_bound[2]) + 10.0
+
+        down_ray_start_z: float = upper_bound_z + 10.0
+        down_ray_distance: float = down_ray_start_z - lower_bound_z + 10.0
+        up_ray_start_z: float = lower_bound_z - 10.0
+        up_ray_distance: float = upper_bound_z - up_ray_start_z + 10.0
+        thickness_threshold: float = cell_size * 5.0
 
         occupied_indices = np.where(buffer == 1.0)[0]
         reclassified_count: int = 0
-
         for idx in occupied_indices:
             x_cell: int = int(idx % dims[0])
             y_cell: int = int(idx // dims[0])
@@ -349,20 +373,38 @@ class OmapCapture:
             cell_x: float = min_bound[0] + (x_cell + 0.5) * cell_size
             cell_y: float = min_bound[1] + (y_cell + 0.5) * cell_size
 
-            origin = carb.Float3(cell_x, cell_y, ray_start_z)
-            direction = carb.Float3(0.0, 0.0, -1.0)
-
-            hit_info = scene_query.raycast_closest(origin, direction, ray_distance)
-            if not hit_info["hit"]:
+            # Stage 1: downward ray — slope check.
+            down_origin = carb.Float3(cell_x, cell_y, down_ray_start_z)
+            down_dir = carb.Float3(0.0, 0.0, -1.0)
+            down_hit = scene_query.raycast_closest(
+                down_origin, down_dir, down_ray_distance,
+            )
+            if not down_hit["hit"]:
                 continue
 
-            normal = hit_info["normal"]
+            normal = down_hit["normal"]
             dot_with_up: float = float(normal[2])
             slope_angle: float = math.acos(max(-1.0, min(1.0, dot_with_up)))
+            if slope_angle >= threshold_rad:
+                continue
 
-            if slope_angle < threshold_rad:
-                slope_free[idx] = True
-                reclassified_count += 1
+            # Stage 2: upward ray — thickness check.
+            top_z: float = float(down_hit["position"][2])
+            up_origin = carb.Float3(cell_x, cell_y, up_ray_start_z)
+            up_dir = carb.Float3(0.0, 0.0, 1.0)
+            up_hit = scene_query.raycast_closest(
+                up_origin, up_dir, up_ray_distance,
+            )
+            if not up_hit["hit"]:
+                continue
+
+            bottom_z: float = float(up_hit["position"][2])
+            thickness: float = top_z - bottom_z
+            if thickness > thickness_threshold:
+                continue
+
+            slope_free[idx] = True
+            reclassified_count += 1
 
         carb.log_info(
             f"Slope filter: {reclassified_count}/{len(occupied_indices)} occupied cells "
