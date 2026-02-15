@@ -38,6 +38,8 @@ class NavigationMapUIBuilder:
         self._upper_bound: list[float] = [1.0, 1.0]
         self._wait_bound_update: bool = False
         self._bound_update_case: int = 0
+        self._exclude_prim_paths: list[str] = []
+        self._exclude_list_container: ui.VStack | None = None
 
     @property
     def models(self) -> dict[str, ui.AbstractValueModel]:
@@ -65,6 +67,7 @@ class NavigationMapUIBuilder:
                 self._build_area_section()
                 self._build_ortho_section()
                 self._build_omap_section()
+                self._build_exclusion_section()
                 self._build_output_section()
 
                 ui.Spacer(height=10)
@@ -168,6 +171,15 @@ class NavigationMapUIBuilder:
         """Read the PhysX geometry checkbox state from the UI."""
         return self._models["physx_geom"].get_value_as_bool()
 
+    def get_exclude_prim_paths(self) -> tuple[str, ...]:
+        """
+        Read the prim path exclusion list.
+
+        Returns:
+            Tuple of prim path strings to exclude from occupancy map generation.
+        """
+        return tuple(self._exclude_prim_paths)
+
     # ------------------------------------------------------------------
     # UI section builders
     # ------------------------------------------------------------------
@@ -246,6 +258,30 @@ class NavigationMapUIBuilder:
                     default_val=True,
                 )
 
+    def _build_exclusion_section(self) -> None:
+        """Build the Prim Exclusion List collapsable frame for omap generation."""
+        with ui.CollapsableFrame(
+            title="Prim Exclusion List", style=get_style(), collapsed=False,
+        ):
+            with ui.VStack(spacing=4, height=0):
+                ui.Label(
+                    "Prims below (and their descendants) are hidden during omap generation.",
+                    word_wrap=True,
+                    height=0,
+                )
+                with ui.ScrollingFrame(height=120):
+                    self._exclude_list_container = ui.VStack(spacing=1, height=0)
+                self._rebuild_exclusion_list_ui()
+                multi_btn_builder(
+                    "Exclusion",
+                    text=["Add from Selection", "Remove Selected", "Clear All"],
+                    on_clicked_fn=[
+                        self._on_add_exclusion_from_selection,
+                        self._on_remove_selected_exclusion,
+                        self._on_clear_exclusion_list,
+                    ],
+                )
+
     def _build_output_section(self) -> None:
         """Build the Output Settings collapsable frame."""
         with ui.CollapsableFrame(title="Output Settings", style=get_style(), collapsed=False):
@@ -256,6 +292,61 @@ class NavigationMapUIBuilder:
                     tooltip="Directory to save captured images and YAML files",
                     use_folder_picker=True,
                 )
+
+    # ------------------------------------------------------------------
+    # Exclusion list callbacks
+    # ------------------------------------------------------------------
+
+    def _rebuild_exclusion_list_ui(self) -> None:
+        """Clear and re-populate the exclusion list VStack with current paths."""
+        if self._exclude_list_container is None:
+            return
+        self._exclude_list_container.clear()
+        with self._exclude_list_container:
+            if not self._exclude_prim_paths:
+                ui.Label("  (empty)", height=20, style={"color": 0xFF888888})
+            else:
+                for idx, path in enumerate(self._exclude_prim_paths):
+                    with ui.HStack(height=20, spacing=4):
+                        cb = ui.CheckBox(width=16, name=f"excl_cb_{idx}")
+                        cb.model.set_value(False)
+                        ui.Label(path, word_wrap=False)
+
+    def _on_add_exclusion_from_selection(self) -> None:
+        """Add currently selected stage prims to the exclusion list."""
+        selected: list[str] = list(
+            omni.usd.get_context().get_selection().get_selected_prim_paths()
+        )
+        if not selected:
+            return
+        changed = False
+        for prim_path in selected:
+            if prim_path not in self._exclude_prim_paths:
+                self._exclude_prim_paths.append(prim_path)
+                changed = True
+        if changed:
+            self._rebuild_exclusion_list_ui()
+
+    def _on_remove_selected_exclusion(self) -> None:
+        """Remove checked items from the exclusion list."""
+        if self._exclude_list_container is None:
+            return
+        indices_to_remove: list[int] = []
+        for idx, child in enumerate(self._exclude_list_container.get_children()):
+            hstack_children = child.get_children()
+            if hstack_children:
+                checkbox = hstack_children[0]
+                if hasattr(checkbox, "model") and checkbox.model.get_value_as_bool():
+                    indices_to_remove.append(idx)
+        for idx in reversed(indices_to_remove):
+            if idx < len(self._exclude_prim_paths):
+                self._exclude_prim_paths.pop(idx)
+        self._rebuild_exclusion_list_ui()
+
+    def _on_clear_exclusion_list(self) -> None:
+        """Clear the entire exclusion list."""
+        self._exclude_prim_paths.clear()
+        self._rebuild_exclusion_list_ui()
 
     # ------------------------------------------------------------------
     # Positioning callbacks (ported from omap UI)

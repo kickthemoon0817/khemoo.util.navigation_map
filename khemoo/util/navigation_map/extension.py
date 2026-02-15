@@ -135,6 +135,8 @@ class NavigationMapExtension(omni.ext.IExt):
         use_physx_geom = self._ui_builder.get_use_physx_geometry()
         output_dir = self._ui_builder.get_output_directory()
 
+        exclude_paths = self._ui_builder.get_exclude_prim_paths()
+
         config = OmapConfig(
             origin=origin,
             lower_bound=lower_bound,
@@ -142,6 +144,7 @@ class NavigationMapExtension(omni.ext.IExt):
             cell_size=cell_size,
             use_physx_geometry=use_physx_geom,
             output_directory=output_dir,
+            exclude_prim_paths=exclude_paths,
         )
         asyncio.ensure_future(self._omap_engine.generate_async(config))
 
