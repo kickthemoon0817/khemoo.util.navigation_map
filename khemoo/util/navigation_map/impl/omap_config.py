@@ -19,6 +19,7 @@ class OmapConfig:
     use_physx_geometry: bool
     output_directory: str
     exclude_prim_paths: tuple[str, ...] = ()
+    max_traversable_slope_degrees: float = 0.0
 
     @property
     def width_cells(self) -> int:

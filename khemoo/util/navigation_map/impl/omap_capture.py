@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from datetime import datetime
 from typing import Optional
@@ -13,6 +14,7 @@ import omni.timeline
 import omni.usd
 from isaacsim.asset.gen.omap.bindings import _omap
 from isaacsim.core.utils.stage import get_stage_units
+from omni.physx import get_physx_scene_query_interface
 from omni.physx.scripts import utils as physx_utils
 from PIL import Image
 from pxr import Sdf, Usd, UsdGeom, UsdPhysics
@@ -124,12 +126,17 @@ class OmapCapture:
         await app.next_update_async()
         self._generator.generate2d()
         await app.next_update_async()
+
+        slope_free_mask: Optional[np.ndarray] = None
+        if config.max_traversable_slope_degrees > 0.0 and self._generator is not None:
+            slope_free_mask = self._compute_slope_free_mask(config)
+
         timeline.stop()
 
         if layer is not None and stage is not None:
             stage.GetSessionLayer().subLayerPaths.remove(layer.identifier)
 
-        return self._save_results(config)
+        return self._save_results(config, slope_free_mask=slope_free_mask)
 
     async def _generate_with_mesh_collision(
         self,
@@ -207,12 +214,21 @@ class OmapCapture:
         await app.next_update_async()
         self._generator.generate2d()
         await app.next_update_async()
+
+        slope_free_mask: Optional[np.ndarray] = None
+        if config.max_traversable_slope_degrees > 0.0 and self._generator is not None:
+            slope_free_mask = self._compute_slope_free_mask(config)
+
         timeline.stop()
 
         session.subLayerPaths.remove(layer.identifier)
-        return self._save_results(config)
+        return self._save_results(config, slope_free_mask=slope_free_mask)
 
-    def _save_results(self, config: OmapConfig) -> Optional[str]:
+    def _save_results(
+        self,
+        config: OmapConfig,
+        slope_free_mask: Optional[np.ndarray] = None,
+    ) -> Optional[str]:
         """
         Save the generated occupancy map as a PNG image and a ROS YAML file.
 
@@ -220,8 +236,13 @@ class OmapCapture:
         computed origin) so that downstream consumers see the exact coordinates
         the user specified.
 
+        When *slope_free_mask* is provided, occupied cells marked ``True``
+        in the mask are reclassified as free space before saving.
+
         Args:
             config: The configuration used for this generation run.
+            slope_free_mask: Boolean array of length ``width * height``.
+                ``True`` entries override occupied cells to free.
 
         Returns:
             File path of the saved PNG, or None if the buffer is empty.
@@ -241,6 +262,9 @@ class OmapCapture:
         image_data = np.full((dims[1], dims[0], 4), unknown_color, dtype=np.uint8)
 
         flat_buffer = np.array(buffer, dtype=np.float32)
+        if slope_free_mask is not None:
+            flat_buffer[slope_free_mask] = 0.0
+
         occupied_mask = flat_buffer == 1.0
         free_mask = flat_buffer == 0.0
         image_flat = image_data.reshape(-1, 4)
@@ -280,6 +304,71 @@ class OmapCapture:
             f"YAML: {yaml_filepath}"
         )
         return png_filepath
+
+    def _compute_slope_free_mask(self, config: OmapConfig) -> np.ndarray:
+        """
+        Identify occupied cells caused only by steep terrain, not real obstacles.
+
+        For every occupied cell, a downward ray is cast from well above the map
+        ceiling.  If the ray hits a surface whose slope angle (relative to the
+        world Z-up vector) is **less than** ``max_traversable_slope_degrees``,
+        that cell is considered traversable ground and will be reclassified as
+        free space.
+
+        Must be called **while the PhysX timeline is still playing** so that
+        the scene query interface has an active scene.
+
+        Args:
+            config: The generation configuration (provides slope threshold).
+
+        Returns:
+            Boolean numpy array of length ``width * height``.  ``True``
+            entries mark occupied cells that should become free.
+        """
+        dims = self._generator.get_dimensions()
+        buffer = np.array(self._generator.get_buffer(), dtype=np.float32)
+        min_bound = self._generator.get_min_bound()
+        upper_bound_z: float = config.origin[2] + config.upper_bound[2]
+        cell_size: float = config.cell_size
+        threshold_rad: float = math.radians(config.max_traversable_slope_degrees)
+
+        total_cells: int = dims[0] * dims[1]
+        slope_free: np.ndarray = np.zeros(total_cells, dtype=bool)
+
+        scene_query = get_physx_scene_query_interface()
+        ray_start_z: float = upper_bound_z + 10.0
+        ray_distance: float = ray_start_z - (config.origin[2] + config.lower_bound[2]) + 10.0
+
+        occupied_indices = np.where(buffer == 1.0)[0]
+        reclassified_count: int = 0
+
+        for idx in occupied_indices:
+            x_cell: int = int(idx % dims[0])
+            y_cell: int = int(idx // dims[0])
+
+            cell_x: float = min_bound[0] + (x_cell + 0.5) * cell_size
+            cell_y: float = min_bound[1] + (y_cell + 0.5) * cell_size
+
+            origin = carb.Float3(cell_x, cell_y, ray_start_z)
+            direction = carb.Float3(0.0, 0.0, -1.0)
+
+            hit_info = scene_query.raycast_closest(origin, direction, ray_distance)
+            if not hit_info["hit"]:
+                continue
+
+            normal = hit_info["normal"]
+            dot_with_up: float = float(normal[2])
+            slope_angle: float = math.acos(max(-1.0, min(1.0, dot_with_up)))
+
+            if slope_angle < threshold_rad:
+                slope_free[idx] = True
+                reclassified_count += 1
+
+        carb.log_info(
+            f"Slope filter: {reclassified_count}/{len(occupied_indices)} occupied cells "
+            f"reclassified as free (threshold={config.max_traversable_slope_degrees}°)"
+        )
+        return slope_free
 
     @staticmethod
     def _hide_excluded_prims(

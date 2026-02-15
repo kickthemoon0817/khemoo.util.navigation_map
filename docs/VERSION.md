@@ -1,5 +1,24 @@
 # Version History
 
+## v0.3.0 — 2026-02-15
+
+Added slope-based post-processing to filter steep terrain from occupancy maps.
+
+### Features
+
+- **Slope-based terrain filtering** — Post-process occupied cells by casting downward rays and comparing surface normals against a configurable slope threshold; traversable ground is reclassified as free space
+- **Max Traversable Slope UI** — New "Max Traversable Slope (°)" field in Occupancy Map Settings (0–90°, default 0 = disabled)
+
+### Modified Files
+
+- `config/extension.toml` — Version bump to v0.3.0
+- `impl/omap_config.py` — Added `max_traversable_slope_degrees` field to `OmapConfig`
+- `impl/omap_capture.py` — Added `_compute_slope_free_mask()` method; integrated slope mask into both PhysX and mesh collision generation paths; `_save_results()` applies mask before image export
+- `ui_builder.py` — Added `get_max_traversable_slope_degrees()` getter and slope angle float field in omap section
+- `extension.py` — Passes `max_traversable_slope_degrees` from UI to `OmapConfig`
+
+---
+
 ## v0.2.0 — 2026-02-12
 
 Integrated `isaacsim.asset.gen.omap` occupancy map generation into the extension.
