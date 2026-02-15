@@ -180,6 +180,10 @@ class NavigationMapUIBuilder:
         """
         return tuple(self._exclude_prim_paths)
 
+    def get_max_traversable_slope_degrees(self) -> float:
+        """Read the max traversable slope angle from the UI (degrees)."""
+        return self._models["max_slope"].get_value_as_float()
+
     # ------------------------------------------------------------------
     # UI section builders
     # ------------------------------------------------------------------
@@ -256,6 +260,19 @@ class NavigationMapUIBuilder:
                     ),
                     on_clicked_fn=None,
                     default_val=True,
+                )
+                self._models["max_slope"] = float_builder(
+                    "Max Traversable Slope (°)",
+                    default_val=0.0,
+                    tooltip=(
+                        "Slope angle threshold in degrees for post-processing. "
+                        "Occupied cells whose ground slope is below this angle are "
+                        "reclassified as free space. Set to 0 to disable."
+                    ),
+                    min=0.0,
+                    max=90.0,
+                    step=1.0,
+                    format="%.1f",
                 )
 
     def _build_exclusion_section(self) -> None:
