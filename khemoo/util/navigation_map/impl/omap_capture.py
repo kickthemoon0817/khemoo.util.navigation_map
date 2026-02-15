@@ -100,6 +100,9 @@ class OmapCapture:
         """
         Generate using existing PhysX collision geometry.
 
+        When ``exclude_prim_paths`` is non-empty, hides the excluded prims
+        in an anonymous session layer before running the simulation.
+
         Args:
             timeline: The timeline interface for play/stop control.
             app: The Kit application interface for frame stepping.
@@ -108,11 +111,24 @@ class OmapCapture:
         Returns:
             File path of the saved PNG, or None on failure.
         """
+        stage = omni.usd.get_context().get_stage()
+        layer: Optional[Sdf.Layer] = None
+
+        if config.exclude_prim_paths and stage is not None:
+            layer = Sdf.Layer.CreateAnonymous("anon_omap_exclusion")
+            stage.GetSessionLayer().subLayerPaths.append(layer.identifier)
+            self._hide_excluded_prims(stage, layer, config.exclude_prim_paths)
+            await app.next_update_async()
+
         timeline.play()
         await app.next_update_async()
         self._generator.generate2d()
         await app.next_update_async()
         timeline.stop()
+
+        if layer is not None and stage is not None:
+            stage.GetSessionLayer().subLayerPaths.remove(layer.identifier)
+
         return self._save_results(config)
 
     async def _generate_with_mesh_collision(
@@ -143,6 +159,9 @@ class OmapCapture:
         session.subLayerPaths.append(layer.identifier)
 
         with Usd.EditContext(stage, layer):
+            if config.exclude_prim_paths:
+                self._hide_excluded_prims(stage, layer, config.exclude_prim_paths)
+
             with Sdf.ChangeBlock():
                 for prim in stage.Traverse():
                     if prim.HasAPI(UsdPhysics.CollisionAPI) and prim.HasAPI(UsdPhysics.RigidBodyAPI):
@@ -261,4 +280,31 @@ class OmapCapture:
             f"YAML: {yaml_filepath}"
         )
         return png_filepath
+
+    @staticmethod
+    def _hide_excluded_prims(
+        stage: Usd.Stage,
+        layer: Sdf.Layer,
+        exclude_prim_paths: tuple[str, ...],
+    ) -> None:
+        """
+        Make excluded prims invisible in the given session layer.
+
+        Each path in *exclude_prim_paths* is treated as a prefix — both the
+        prim itself and all descendants under it are hidden so that the
+        PhysX raycast ignores them entirely.
+
+        Args:
+            stage: The current USD stage.
+            layer: The anonymous session layer to write visibility overrides into.
+            exclude_prim_paths: Prim path prefixes to exclude.
+        """
+        with Usd.EditContext(stage, layer):
+            with Sdf.ChangeBlock():
+                for prim in stage.Traverse():
+                    prim_path: str = prim.GetPath().pathString
+                    if any(prim_path.startswith(ep) for ep in exclude_prim_paths):
+                        imageable = UsdGeom.Imageable(prim)
+                        if imageable:
+                            imageable.MakeInvisible()
 

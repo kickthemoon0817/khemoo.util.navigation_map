@@ -18,6 +18,7 @@ class OmapConfig:
     cell_size: float
     use_physx_geometry: bool
     output_directory: str
+    exclude_prim_paths: tuple[str, ...] = ()
 
     @property
     def width_cells(self) -> int:
