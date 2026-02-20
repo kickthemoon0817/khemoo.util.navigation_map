@@ -78,7 +78,9 @@ class NavigationMapUIBuilder:
     @property
     def selected_output_type(self) -> str:
         """The currently selected output type from the dropdown."""
-        return OUTPUT_TYPES[self._output_type_index]
+        if 0 <= self._output_type_index < len(OUTPUT_TYPES):
+            return OUTPUT_TYPES[self._output_type_index]
+        return OUTPUT_TYPE_BOTH
 
     def build(
         self,
@@ -96,6 +98,7 @@ class NavigationMapUIBuilder:
             on_generate: Callback for the single "Generate" button.
             on_open_folder: Callback to open the output directory in a file browser.
         """
+        self._models.clear()
         self._om = omap_interface
         with frame:
             with ui.VStack(spacing=5, height=0, style=get_style()):
@@ -264,6 +267,14 @@ class NavigationMapUIBuilder:
         if self._generate_btn is not None:
             self._generate_btn.enabled = enabled
 
+    def cleanup(self) -> None:
+        """Release references to break circular dependencies on shutdown."""
+        self._om = None
+        self._models.clear()
+        self._status_label = None
+        self._progress_model = None
+        self._generate_btn = None
+        self._exclude_list_container = None
 
     # ------------------------------------------------------------------
     # UI section builders
@@ -491,7 +502,8 @@ class NavigationMapUIBuilder:
 
     def _on_output_type_changed(self, index: int) -> None:
         """Handle output type dropdown selection change."""
-        self._output_type_index = index
+        if 0 <= index < len(OUTPUT_TYPES):
+            self._output_type_index = index
 
     # ------------------------------------------------------------------
     # Positioning callbacks (ported from omap UI)
@@ -568,6 +580,7 @@ class NavigationMapUIBuilder:
         self._bound_update_case += 1
         self._models["upper_bound"][1].set_value(self._upper_bound[1])
         self._wait_bound_update = False
+        self._update_viewport_visualization()
 
     def _calculate_bounds(
         self, origin_calc: bool, stationary_bounds: bool,
@@ -602,7 +615,6 @@ class NavigationMapUIBuilder:
         selected_paths = omni.usd.get_context().get_selection().get_selected_prim_paths()
         stage = omni.usd.get_context().get_stage()
         bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), includedPurposes=[UsdGeom.Tokens.default_])
-        bbox_cache.Clear()
         total_bbox = Gf.BBox3d()
 
         if len(selected_paths) > 0:

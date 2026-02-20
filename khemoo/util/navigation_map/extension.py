@@ -12,6 +12,7 @@ import carb
 import omni.ext
 import omni.kit.app
 import omni.ui as ui
+import omni.usd
 from isaacsim.asset.gen.omap.bindings import _omap
 from isaacsim.gui.components.element_wrappers import ScrollingWindow
 from isaacsim.gui.components.menu import make_menu_item_description
@@ -54,6 +55,7 @@ class NavigationMapExtension(omni.ext.IExt):
         self._omap_engine: Optional[OmapCapture] = None
         self._om: Any | None = None
         self._ui_builder: NavigationMapUIBuilder = NavigationMapUIBuilder()
+        self._current_task: Optional[asyncio.Task[None]] = None
 
     def on_startup(self, ext_id: str) -> None:
         """
@@ -86,6 +88,12 @@ class NavigationMapExtension(omni.ext.IExt):
     def on_shutdown(self) -> None:
         """Called by Kit when the extension is unloaded. Releases all resources."""
         carb.log_info(f"{EXTENSION_TITLE} shutting down.")
+
+        if self._current_task is not None and not self._current_task.done():
+            self._current_task.cancel()
+            self._current_task = None
+
+        self._ui_builder.cleanup()
 
         if self._capture_engine is not None:
             self._capture_engine.destroy()
@@ -128,6 +136,8 @@ class NavigationMapExtension(omni.ext.IExt):
 
     def _on_generate(self) -> None:
         """Validate inputs and dispatch to the correct async workflow."""
+        if self._current_task is not None and not self._current_task.done():
+            return
         error = self._validate_inputs()
         if error is not None:
             self._ui_builder.set_status(error, STATUS_ERROR)
@@ -137,11 +147,11 @@ class NavigationMapExtension(omni.ext.IExt):
         self._ui_builder.set_progress(0.0)
         self._ui_builder.set_status("Starting...", STATUS_INFO)
         if output_type == OUTPUT_TYPE_IMAGE:
-            asyncio.ensure_future(self._generate_image_async())
+            self._current_task = asyncio.ensure_future(self._generate_image_async())
         elif output_type == OUTPUT_TYPE_NAV_MAP:
-            asyncio.ensure_future(self._generate_navmap_async())
+            self._current_task = asyncio.ensure_future(self._generate_navmap_async())
         else:
-            asyncio.ensure_future(self._generate_both_async())
+            self._current_task = asyncio.ensure_future(self._generate_both_async())
 
     def _validate_inputs(self) -> str | None:
         """
@@ -150,6 +160,11 @@ class NavigationMapExtension(omni.ext.IExt):
         Returns:
             An error message string if validation fails, or None if valid.
         """
+        if self._capture_engine is None or self._omap_engine is None:
+            return "Capture engines not initialized. Restart the extension."
+        stage = omni.usd.get_context().get_stage()
+        if stage is None:
+            return "No USD stage loaded. Open or create a scene first."
         x_min, x_max, y_min, y_max = self._ui_builder.get_boundary_values()
         if x_min >= x_max or y_min >= y_max:
             return "Area Min must be less than Area Max in both X and Y."
@@ -211,16 +226,18 @@ class NavigationMapExtension(omni.ext.IExt):
             filepath = await self._capture_engine.capture_async(
                 progress_fn=self._on_capture_progress,
             )
-            self._restore_guide_visualization()
             if filepath:
                 self._ui_builder.set_status(f"Saved: {filepath}", STATUS_SUCCESS)
             else:
                 self._ui_builder.set_status("Capture failed — check console.", STATUS_ERROR)
+        except asyncio.CancelledError:
+            carb.log_warn("Image capture cancelled.")
+            self._ui_builder.set_status("Cancelled.", STATUS_WARNING)
         except Exception as exc:
             carb.log_error(f"Image capture failed: {exc}")
             self._ui_builder.set_status(f"Error: {exc}", STATUS_ERROR)
-            self._restore_guide_visualization()
         finally:
+            self._restore_guide_visualization()
             self._ui_builder.set_progress(1.0)
             self._ui_builder.set_generate_enabled(True)
 
@@ -235,6 +252,9 @@ class NavigationMapExtension(omni.ext.IExt):
                 self._ui_builder.set_status(f"Saved: {filepath}", STATUS_SUCCESS)
             else:
                 self._ui_builder.set_status("Generation failed — check console.", STATUS_ERROR)
+        except asyncio.CancelledError:
+            carb.log_warn("Nav map generation cancelled.")
+            self._ui_builder.set_status("Cancelled.", STATUS_WARNING)
         except Exception as exc:
             carb.log_error(f"Nav map generation failed: {exc}")
             self._ui_builder.set_status(f"Error: {exc}", STATUS_ERROR)
@@ -254,7 +274,6 @@ class NavigationMapExtension(omni.ext.IExt):
             img_path = await self._capture_engine.capture_async(
                 progress_fn=self._on_capture_progress_half,
             )
-            self._restore_guide_visualization()
             if not img_path:
                 self._ui_builder.set_status("Image capture failed — check console.", STATUS_ERROR)
                 return
@@ -270,11 +289,14 @@ class NavigationMapExtension(omni.ext.IExt):
                 self._ui_builder.set_status(
                     f"Image saved ({img_path}) but map generation failed.", STATUS_WARNING,
                 )
+        except asyncio.CancelledError:
+            carb.log_warn("Combined generation cancelled.")
+            self._ui_builder.set_status("Cancelled.", STATUS_WARNING)
         except Exception as exc:
             carb.log_error(f"Combined generation failed: {exc}")
             self._ui_builder.set_status(f"Error: {exc}", STATUS_ERROR)
-            self._restore_guide_visualization()
         finally:
+            self._restore_guide_visualization()
             self._ui_builder.set_progress(1.0)
             self._ui_builder.set_generate_enabled(True)
 
@@ -326,7 +348,7 @@ class NavigationMapExtension(omni.ext.IExt):
         if sys.platform == "win32":
             os.startfile(path)
         elif sys.platform == "darwin":
-            subprocess.Popen(["open", path])
+            subprocess.run(["open", path], check=False)
         else:
-            subprocess.Popen(["xdg-open", path])
+            subprocess.run(["xdg-open", path], check=False)
 
