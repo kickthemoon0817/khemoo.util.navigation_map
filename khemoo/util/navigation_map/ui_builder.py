@@ -9,12 +9,36 @@ from isaacsim.gui.components.style import get_style
 from isaacsim.gui.components.ui_utils import (
     btn_builder,
     cb_builder,
+    dropdown_builder,
     float_builder,
     multi_btn_builder,
+    progress_bar_builder,
     str_builder,
     xyz_builder,
 )
 from pxr import Gf, Usd, UsdGeom
+
+# Output type choices for the dropdown
+OUTPUT_TYPE_IMAGE: str = "Aerial Photo"
+OUTPUT_TYPE_NAV_MAP: str = "Navigation Map"
+OUTPUT_TYPE_BOTH: str = "Both"
+OUTPUT_TYPES: tuple[str, ...] = (OUTPUT_TYPE_IMAGE, OUTPUT_TYPE_NAV_MAP, OUTPUT_TYPE_BOTH)
+
+# Status severity levels
+STATUS_READY: int = 0
+STATUS_INFO: int = 1
+STATUS_WARNING: int = 2
+STATUS_ERROR: int = 3
+STATUS_SUCCESS: int = 4
+
+# ARGB color codes for status bar messages
+_STATUS_COLORS: dict[int, int] = {
+    STATUS_READY: 0xFF999999,    # gray
+    STATUS_INFO: 0xFFCCCCCC,     # light gray
+    STATUS_WARNING: 0xFFFFAA00,  # amber
+    STATUS_ERROR: 0xFFFF4444,    # red
+    STATUS_SUCCESS: 0xFF44BB44,  # green
+}
 
 
 class NavigationMapUIBuilder:
@@ -41,19 +65,27 @@ class NavigationMapUIBuilder:
         self._exclude_prim_paths: list[str] = []
         self._exclude_list_container: ui.VStack | None = None
         self._om: object | None = None
+        self._status_label: ui.Label | None = None
+        self._progress_model: ui.AbstractValueModel | None = None
+        self._output_type_index: int = 2
+        self._generate_btn: ui.Button | None = None
 
     @property
     def models(self) -> dict[str, ui.AbstractValueModel]:
         """Direct access to the UI value models keyed by field name."""
         return self._models
 
+    @property
+    def selected_output_type(self) -> str:
+        """The currently selected output type from the dropdown."""
+        return OUTPUT_TYPES[self._output_type_index]
+
     def build(
         self,
         frame: ui.Frame,
         omap_interface: object | None,
-        on_create_camera: Callable[[], None],
-        on_capture_ortho: Callable[[], None],
-        on_generate_omap: Callable[[], None],
+        on_generate: Callable[[], None],
+        on_open_folder: Callable[[], None],
     ) -> None:
         """
         Construct the full UI inside the given frame.
@@ -61,39 +93,43 @@ class NavigationMapUIBuilder:
         Args:
             frame: The parent UI frame to build widgets into.
             omap_interface: The OccupancyMap singleton for viewport visualization.
-            on_create_camera: Callback for the "Create Camera" button.
-            on_capture_ortho: Callback for the "Capture Orthographic Map" button.
-            on_generate_omap: Callback for the "Generate Occupancy Map" button.
+            on_generate: Callback for the single "Generate" button.
+            on_open_folder: Callback to open the output directory in a file browser.
         """
         self._om = omap_interface
         with frame:
             with ui.VStack(spacing=5, height=0, style=get_style()):
                 self._build_area_section()
-                self._build_ortho_section()
-                self._build_omap_section()
+                self._build_settings_section()
                 self._build_exclusion_section()
                 self._build_output_section()
 
                 ui.Spacer(height=10)
-                btn_builder(
-                    label="Create Camera",
-                    text="CREATE CAMERA",
-                    tooltip="Create orthographic camera based on area and camera settings",
-                    on_clicked_fn=on_create_camera,
+                self._generate_btn = btn_builder(
+                    label="",
+                    text="GENERATE",
+                    tooltip="Run the selected output workflow",
+                    on_clicked_fn=on_generate,
+                )
+                ui.Spacer(height=5)
+                self._progress_model = progress_bar_builder(
+                    label="Progress",
+                    default_val=0,
+                    tooltip="Overall generation progress",
+                )
+                ui.Spacer(height=5)
+                self._status_label = ui.Label(
+                    "Ready",
+                    word_wrap=True,
+                    height=0,
+                    style={"color": _STATUS_COLORS[STATUS_READY]},
                 )
                 ui.Spacer(height=5)
                 btn_builder(
-                    label="Ortho Capture",
-                    text="CAPTURE ORTHOGRAPHIC MAP",
-                    tooltip="Capture a top-down orthographic image of the defined area",
-                    on_clicked_fn=on_capture_ortho,
-                )
-                ui.Spacer(height=5)
-                btn_builder(
-                    label="Omap Generate",
-                    text="GENERATE OCCUPANCY MAP",
-                    tooltip="Generate a 2D occupancy map using PhysX raycasting",
-                    on_clicked_fn=on_generate_omap,
+                    label="",
+                    text="Open Output Folder",
+                    tooltip="Open the output directory in your file browser",
+                    on_clicked_fn=on_open_folder,
                 )
 
     # ------------------------------------------------------------------
@@ -189,15 +225,59 @@ class NavigationMapUIBuilder:
         return self._models["max_slope"].get_value_as_float()
 
     # ------------------------------------------------------------------
+    # Public setters — UI state control
+    # ------------------------------------------------------------------
+
+    def set_status(self, message: str, severity: int = STATUS_INFO) -> None:
+        """
+        Update the status label text and color.
+
+        Args:
+            message: Status message to display.
+            severity: One of STATUS_READY, STATUS_INFO, STATUS_WARNING,
+                STATUS_ERROR, or STATUS_SUCCESS.
+        """
+        if self._status_label is None:
+            return
+        self._status_label.text = message
+        color = _STATUS_COLORS.get(severity, _STATUS_COLORS[STATUS_INFO])
+        self._status_label.style = {"color": color}
+
+    def set_progress(self, fraction: float) -> None:
+        """
+        Update the progress bar value.
+
+        Args:
+            fraction: Progress value between 0.0 and 1.0.
+        """
+        if self._progress_model is None:
+            return
+        self._progress_model.set_value(max(0.0, min(1.0, fraction)))
+
+    def set_generate_enabled(self, enabled: bool) -> None:
+        """
+        Enable or disable the Generate button.
+
+        Args:
+            enabled: Whether the button should be clickable.
+        """
+        if self._generate_btn is not None:
+            self._generate_btn.enabled = enabled
+
+
+    # ------------------------------------------------------------------
     # UI section builders
     # ------------------------------------------------------------------
 
     def _build_area_section(self) -> None:
-        """Build the Area Definition collapsable frame with origin, bounds, and positioning."""
-        with ui.CollapsableFrame(title="Area Definition", style=get_style(), collapsed=False):
+        """Build the Step 1 — Define Map Area section."""
+        with ui.CollapsableFrame(
+            title="Step 1 \u2014 Define Map Area", style=get_style(), collapsed=False,
+        ):
             with ui.VStack(spacing=2, height=0):
                 self._models["origin"] = xyz_builder(
                     label="Origin",
+                    tooltip="Center point of the map area in world coordinates",
                     on_value_changed_fn=[
                         self._on_area_value_changed,
                         self._on_area_value_changed,
@@ -205,7 +285,8 @@ class NavigationMapUIBuilder:
                     ],
                 )
                 self._models["lower_bound"] = xyz_builder(
-                    label="Lower Bound",
+                    label="Area Min",
+                    tooltip="Lower-left corner of the map area, relative to Origin",
                     default_val=[self._lower_bound[0], self._lower_bound[1], 0.0],
                     on_value_changed_fn=[
                         self._on_area_value_changed,
@@ -214,7 +295,8 @@ class NavigationMapUIBuilder:
                     ],
                 )
                 self._models["upper_bound"] = xyz_builder(
-                    label="Upper Bound",
+                    label="Area Max",
+                    tooltip="Upper-right corner of the map area, relative to Origin",
                     default_val=[self._upper_bound[0], self._upper_bound[1], 0.0],
                     on_value_changed_fn=[
                         self._on_area_value_changed,
@@ -223,71 +305,92 @@ class NavigationMapUIBuilder:
                     ],
                 )
                 self._models["center_bound"] = multi_btn_builder(
-                    "Positioning",
-                    text=["Center to Selection", "Bound Selection"],
+                    "Quick Select",
+                    text=["Fit to Selection", "Set Area from Selection"],
+                    tooltip=[
+                        "Use viewport selection to position the map area",
+                        "Move the origin to the center of selected objects",
+                        "Set area boundaries from the bounding box of selected objects",
+                    ],
                     on_clicked_fn=[self._on_center_selection, self._on_bound_selection],
                 )
                 self._models["cell_size"] = float_builder(
-                    label="Cell Size",
+                    label="Map Detail",
                     default_val=0.05,
                     min=0.001,
                     step=0.001,
                     format="%.3f",
-                    tooltip="Cell size in stage units for occupancy map resolution",
+                    tooltip=(
+                        "Grid cell size in meters \u2014 smaller values produce a finer map "
+                        "but take longer to generate. Default 0.05 m works well for "
+                        "indoor environments."
+                    ),
                 )
                 self._models["cell_size"].add_value_changed_fn(self._on_cell_size_changed)
 
-    def _build_ortho_section(self) -> None:
-        """Build the Orthographic Settings collapsable frame."""
-        with ui.CollapsableFrame(title="Orthographic Settings", style=get_style(), collapsed=False):
+    def _build_settings_section(self) -> None:
+        """Build the Step 2 — Settings section with common and advanced options."""
+        with ui.CollapsableFrame(
+            title="Step 2 \u2014 Settings", style=get_style(), collapsed=True,
+        ):
             with ui.VStack(spacing=2, height=0):
                 self._models["z_height"] = float_builder(
-                    "Z Height", default_val=50.0, tooltip="Camera height above the scene",
+                    "Camera Height",
+                    default_val=50.0,
+                    tooltip=(
+                        "Height of the overhead camera in meters. Set higher than "
+                        "the tallest object in your scene."
+                    ),
                 )
                 self._models["meters_per_pixel"] = float_builder(
-                    "Meters per Pixel", default_val=0.05,
-                    tooltip="Meters per pixel for calculating image resolution",
-                )
-                self._models["camera_path"] = str_builder(
-                    "Camera Path", default_val="/World/OrthoCamera",
-                    tooltip="USD path for the orthographic camera",
-                )
-
-    def _build_omap_section(self) -> None:
-        """Build the Occupancy Map Settings collapsable frame."""
-        with ui.CollapsableFrame(title="Occupancy Map Settings", style=get_style(), collapsed=False):
-            with ui.VStack(spacing=2, height=0):
-                self._models["physx_geom"] = cb_builder(
-                    "Use PhysX Collision Geometry",
+                    "Resolution (m/px)",
+                    default_val=0.05,
                     tooltip=(
-                        "If True, current collision approximations are used. "
-                        "If False, original USD meshes are used with RigidBody removal."
+                        "Meters per pixel in the aerial photo. Smaller values give "
+                        "sharper images but produce larger files and take longer."
                     ),
-                    on_clicked_fn=None,
-                    default_val=True,
                 )
                 self._models["max_slope"] = float_builder(
-                    "Max Traversable Slope (°)",
+                    "Slope Limit (\u00b0)",
                     default_val=0.0,
                     tooltip=(
-                        "Slope angle threshold in degrees for post-processing. "
-                        "Occupied cells whose ground slope is below this angle are "
-                        "reclassified as free space. Set to 0 to disable."
+                        "Maximum ground slope in degrees that a robot can traverse. "
+                        "Steeper surfaces are marked as obstacles. Set to 0 to disable."
                     ),
                     min=0.0,
                     max=90.0,
                     step=1.0,
                     format="%.1f",
                 )
+                with ui.CollapsableFrame(
+                    title="Advanced", style=get_style(), collapsed=True,
+                ):
+                    with ui.VStack(spacing=2, height=0):
+                        self._models["camera_path"] = str_builder(
+                            "Camera Path",
+                            default_val="/World/OrthoCamera",
+                            tooltip="USD prim path for the overhead camera (internal)",
+                        )
+                        self._models["physx_geom"] = cb_builder(
+                            "Use Collision Geometry",
+                            tooltip=(
+                                "When enabled, uses the physics collision shapes instead "
+                                "of visual meshes. Leave enabled unless you see missing "
+                                "obstacles in the output."
+                            ),
+                            on_clicked_fn=None,
+                            default_val=True,
+                        )
 
     def _build_exclusion_section(self) -> None:
-        """Build the Prim Exclusion List collapsable frame for omap generation."""
+        """Build the Ignore Objects section."""
         with ui.CollapsableFrame(
-            title="Prim Exclusion List", style=get_style(), collapsed=False,
+            title="Ignore Objects", style=get_style(), collapsed=True,
         ):
             with ui.VStack(spacing=4, height=0):
                 ui.Label(
-                    "Prims below (and their descendants) are hidden during omap generation.",
+                    "Objects listed here (and their children) will be hidden "
+                    "during map generation.",
                     word_wrap=True,
                     height=0,
                 )
@@ -295,8 +398,15 @@ class NavigationMapUIBuilder:
                     self._exclude_list_container = ui.VStack(spacing=1, height=0)
                 self._rebuild_exclusion_list_ui()
                 multi_btn_builder(
-                    "Exclusion",
-                    text=["Add from Selection", "Remove Selected", "Clear All"],
+                    "Actions",
+                    count=3,
+                    text=["Add from Selection", "Remove Checked", "Clear All"],
+                    tooltip=[
+                        "Manage the ignore list",
+                        "Add the currently selected viewport objects",
+                        "Remove checked items from the list",
+                        "Remove all items from the list",
+                    ],
                     on_clicked_fn=[
                         self._on_add_exclusion_from_selection,
                         self._on_remove_selected_exclusion,
@@ -305,13 +415,22 @@ class NavigationMapUIBuilder:
                 )
 
     def _build_output_section(self) -> None:
-        """Build the Output Settings collapsable frame."""
-        with ui.CollapsableFrame(title="Output Settings", style=get_style(), collapsed=False):
+        """Build the Step 3 — Output section with output type and directory."""
+        with ui.CollapsableFrame(
+            title="Step 3 \u2014 Output", style=get_style(), collapsed=False,
+        ):
             with ui.VStack(spacing=2, height=0):
+                dropdown_builder(
+                    label="Output Type",
+                    default_val=self._output_type_index,
+                    items=list(OUTPUT_TYPES),
+                    tooltip="Choose what to generate",
+                    on_clicked_fn=self._on_output_type_changed,
+                )
                 self._models["output_dir"] = str_builder(
                     "Output Directory",
                     default_val=os.path.expanduser("~/navigation_maps"),
-                    tooltip="Directory to save captured images and YAML files",
+                    tooltip="Folder where generated files will be saved",
                     use_folder_picker=True,
                 )
 
@@ -369,6 +488,10 @@ class NavigationMapUIBuilder:
         """Clear the entire exclusion list."""
         self._exclude_prim_paths.clear()
         self._rebuild_exclusion_list_ui()
+
+    def _on_output_type_changed(self, index: int) -> None:
+        """Handle output type dropdown selection change."""
+        self._output_type_index = index
 
     # ------------------------------------------------------------------
     # Positioning callbacks (ported from omap UI)
