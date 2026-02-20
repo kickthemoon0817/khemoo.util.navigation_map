@@ -120,7 +120,7 @@ class OmapCapture:
         context = omni.usd.get_context()
         physx_interface = omni.physx.get_physx_interface()
         self._generator = _omap.Generator(physx_interface, context.get_stage_id())
-        self._generator.update_settings(config.cell_size, 1.0, 0.0, 0.5)
+        self._generator.update_settings(config.cell_size, 4, 5, 6)
         self._generator.set_transform(
             config.origin, config.lower_bound, config.upper_bound,
         )
@@ -219,7 +219,7 @@ class OmapCapture:
         context = omni.usd.get_context()
         physx_interface = omni.physx.get_physx_interface()
         self._generator = _omap.Generator(physx_interface, context.get_stage_id())
-        self._generator.update_settings(config.cell_size, 1.0, 0.0, 0.5)
+        self._generator.update_settings(config.cell_size, 4, 5, 6)
         self._generator.set_transform(
             config.origin, config.lower_bound, config.upper_bound,
         )
@@ -245,9 +245,11 @@ class OmapCapture:
         """
         Save the generated occupancy map as a PNG image and a ROS YAML file.
 
-        The ROS YAML origin uses the **input** origin (not the grid-aligned
-        computed origin) so that downstream consumers see the exact coordinates
-        the user specified.
+        The image is rotated 180° to match the native Isaac Sim omap
+        extension default orientation.  The ROS YAML origin is computed
+        from the generator's actual grid bounds (``get_min_bound``) with a
+        half-cell offset, matching the native ``compute_coordinates``
+        formula at 180° rotation.
 
         When *slope_free_mask* is provided, occupied cells marked ``True``
         in the mask are reclassified as free space before saving.
@@ -293,10 +295,15 @@ class OmapCapture:
         img = img.rotate(-180, expand=True)
         img.save(png_filepath)
 
-        # ROS YAML — use input origin for exact user-specified coordinates
+        # ROS YAML — origin from generator actual bounds, matching native
+        # omap extension default (180° rotation).  At 180° the ROS origin
+        # corresponds to compute_coordinates "top_right" which becomes
+        # "bottom_left" after the corner swap: (min_b + half_cell).
         scale_to_meters = 1.0 / get_stage_units()
-        origin_x = config.origin[0] + config.lower_bound[0]
-        origin_y = config.origin[1] + config.lower_bound[1]
+        min_b = self._generator.get_min_bound()
+        half_w = config.cell_size * 0.5
+        origin_x = min_b[0] + half_w
+        origin_y = min_b[1] + half_w
 
         yaml_filename = f"omap_{timestamp}.yaml"
         yaml_filepath = os.path.join(config.output_directory, yaml_filename)
