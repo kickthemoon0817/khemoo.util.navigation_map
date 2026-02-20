@@ -245,7 +245,7 @@ class NavigationMapUIBuilder:
                     "Z Height", default_val=50.0, tooltip="Camera height above the scene",
                 )
                 self._models["meters_per_pixel"] = float_builder(
-                    "Meters per Pixel", default_val=0.01,
+                    "Meters per Pixel", default_val=0.05,
                     tooltip="Meters per pixel for calculating image resolution",
                 )
                 self._models["camera_path"] = str_builder(
