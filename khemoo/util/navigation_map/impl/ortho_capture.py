@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
-from typing import Optional
+from typing import Callable, Optional
 
 import carb
 import numpy as np
@@ -125,13 +125,20 @@ class OrthoMapCapture:
             f"Tiles: {grid.num_tiles_x}x{grid.num_tiles_y}"
         )
 
-    async def capture_async(self) -> Optional[str]:
+    async def capture_async(
+        self,
+        progress_fn: Callable[[int, int], None] | None = None,
+    ) -> Optional[str]:
         """
         Capture the full orthographic image by rendering all tiles and stitching them.
 
         Moves the camera across the tile grid, captures each tile via Replicator,
         and assembles the final image. The Y-axis is flipped so that y_min maps
         to the bottom of the output image.
+
+        Args:
+            progress_fn: Optional callback invoked after each tile with
+                (current_tile, total_tiles). Useful for updating a progress bar.
 
         Returns:
             The file path of the saved image, or None if capture failed.
@@ -195,6 +202,8 @@ class OrthoMapCapture:
                 img_y_end = grid.total_height_pixels - py_start
                 final_image[img_y_start:img_y_end, px_start : px_start + grid.tile_width_pixels] = tile_data
 
+                if progress_fn is not None:
+                    progress_fn(tile_count, grid.total_tiles)
                 if grid.uses_tiling:
                     carb.log_info(f"  Captured tile {tile_count}/{grid.total_tiles}")
 
