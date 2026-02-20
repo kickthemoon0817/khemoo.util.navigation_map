@@ -6,6 +6,7 @@ from typing import Optional
 
 import carb
 import numpy as np
+import omni.kit.app
 import omni.kit.commands
 import omni.replicator.core as rep
 import omni.usd
@@ -23,6 +24,15 @@ APERTURE_METERS_TO_USD_CM: float = 10.0
 # added beyond twice the camera height to ensure tall geometry is captured.
 NEAR_CLIP_DISTANCE: float = 0.1
 FAR_CLIP_BUFFER: float = 100.0
+
+# Number of frames to wait after teleporting the camera before reading the
+# annotator buffer.  The Omniverse render pipeline is multi-stage (USD notice
+# propagation → scene delegate update → Hydra render → output buffer write).
+# A single step_async() can return a frame rendered from the *previous* camera
+# position, causing misaligned or "rotated" tile sections in the stitched image.
+# Two settle frames are the minimum: one propagates the USD xform attribute,
+# the second ensures the render output buffer reflects the new viewpoint.
+SETTLE_FRAMES_AFTER_TELEPORT: int = 2
 
 
 class OrthoMapCapture:
@@ -165,6 +175,12 @@ class OrthoMapCapture:
                 xform_api.SetTranslate(
                     Gf.Vec3d(tile_center_x, tile_center_y, config.camera_height_meters)
                 )
+
+                # Wait for the render pipeline to fully propagate the new camera
+                # position before capturing.  Without this, the annotator may
+                # return a frame rendered from the previous tile's viewpoint.
+                for _ in range(SETTLE_FRAMES_AFTER_TELEPORT):
+                    await omni.kit.app.get_app().next_update_async()
                 await rep.orchestrator.step_async()
 
                 rgb_data = self._rgb_annotator.get_data()
