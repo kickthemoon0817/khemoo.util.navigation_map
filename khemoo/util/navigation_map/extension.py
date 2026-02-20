@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import gc
 import weakref
-from typing import Optional
+from typing import Any, Optional
 
 import carb
 import omni.ext
+import omni.kit.app
 import omni.ui as ui
+from isaacsim.asset.gen.omap.bindings import _omap
 from isaacsim.gui.components.element_wrappers import ScrollingWindow
 from isaacsim.gui.components.menu import make_menu_item_description
 from omni.kit.menu.utils import MenuItemDescription, add_menu_items, remove_menu_items
@@ -38,6 +40,7 @@ class NavigationMapExtension(omni.ext.IExt):
         self._menu_items: list[MenuItemDescription] = []
         self._capture_engine: Optional[OrthoMapCapture] = None
         self._omap_engine: Optional[OmapCapture] = None
+        self._om: Any | None = None
         self._ui_builder: NavigationMapUIBuilder = NavigationMapUIBuilder()
 
     def on_startup(self, ext_id: str) -> None:
@@ -50,6 +53,7 @@ class NavigationMapExtension(omni.ext.IExt):
         self._ext_id = ext_id
         self._capture_engine = OrthoMapCapture()
         self._omap_engine = OmapCapture()
+        self._om = _omap.acquire_omap_interface()
 
         self._window = ScrollingWindow(
             title=EXTENSION_TITLE, width=450, height=600, visible=False,
@@ -79,6 +83,10 @@ class NavigationMapExtension(omni.ext.IExt):
             self._omap_engine.destroy()
             self._omap_engine = None
 
+        if self._om is not None:
+            _omap.release_omap_interface(self._om)
+            self._om = None
+
         if self._menu_items:
             remove_menu_items(self._menu_items, "Tools")
             self._menu_items = []
@@ -92,6 +100,7 @@ class NavigationMapExtension(omni.ext.IExt):
         if visible and self._window is not None:
             self._ui_builder.build(
                 frame=self._window.frame,
+                omap_interface=self._om,
                 on_create_camera=self._on_create_camera,
                 on_capture_ortho=self._on_capture_ortho,
                 on_generate_omap=self._on_generate_omap,
@@ -124,7 +133,39 @@ class NavigationMapExtension(omni.ext.IExt):
         if not self._capture_engine.is_ready:
             carb.log_warn("No camera created. Please create a camera first.")
             return
-        asyncio.ensure_future(self._capture_engine.capture_async())
+        asyncio.ensure_future(self._capture_ortho_async())
+
+    async def _capture_ortho_async(self) -> None:
+        """
+        Run the orthographic capture with the guide visualization hidden.
+
+        Deactivates the omap bounding-box / grid overlay so it does not
+        appear in the rendered image, performs the tiled capture, then
+        restores the guide to its previous state.
+        """
+        self._deactivate_guide_visualization()
+        await omni.kit.app.get_app().next_update_async()
+        try:
+            await self._capture_engine.capture_async()
+        finally:
+            self._restore_guide_visualization()
+
+    def _deactivate_guide_visualization(self) -> None:
+        """Collapse the omap guide transform to zero so nothing is drawn."""
+        if self._om is None:
+            return
+        self._om.set_transform((0, 0, 0), (0, 0, 0), (0, 0, 0))
+        self._om.update()
+
+    def _restore_guide_visualization(self) -> None:
+        """Restore the omap guide to reflect the current UI bounds."""
+        if self._om is None:
+            return
+        origin = self._ui_builder.get_origin()
+        lower = self._ui_builder.get_lower_bound()
+        upper = self._ui_builder.get_upper_bound()
+        self._om.set_transform(origin, lower, upper)
+        self._om.update()
 
     def _on_generate_omap(self) -> None:
         """Kick off the async occupancy map generation."""

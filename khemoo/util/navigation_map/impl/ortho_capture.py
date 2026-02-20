@@ -14,6 +14,16 @@ from pxr import Gf, UsdGeom
 
 from .ortho_config import OrthoMapConfig
 
+# USD orthographic camera aperture attributes are stored in centimeters,
+# while tile dimensions are in meters.  This factor converts meters → cm.
+APERTURE_METERS_TO_USD_CM: float = 10.0
+
+# Camera clipping plane defaults.  NEAR_CLIP_DISTANCE is the minimum
+# distance from the camera plane to the near clip; FAR_CLIP_BUFFER is
+# added beyond twice the camera height to ensure tall geometry is captured.
+NEAR_CLIP_DISTANCE: float = 0.1
+FAR_CLIP_BUFFER: float = 100.0
+
 
 class OrthoMapCapture:
     """
@@ -82,10 +92,14 @@ class OrthoMapCapture:
         xform_api.SetRotate(Gf.Vec3f(0, 0, 0), UsdGeom.XformCommonAPI.RotationOrderXYZ)
 
         self._camera_prim.GetProjectionAttr().Set("orthographic")
-        self._camera_prim.GetHorizontalApertureAttr().Set(grid.tile_width_meters * 10.0)
-        self._camera_prim.GetVerticalApertureAttr().Set(grid.tile_height_meters * 10.0)
+        self._camera_prim.GetHorizontalApertureAttr().Set(
+            grid.tile_width_meters * APERTURE_METERS_TO_USD_CM,
+        )
+        self._camera_prim.GetVerticalApertureAttr().Set(
+            grid.tile_height_meters * APERTURE_METERS_TO_USD_CM,
+        )
         self._camera_prim.GetClippingRangeAttr().Set(
-            Gf.Vec2f(0.1, config.camera_height_meters * 2 + 100)
+            Gf.Vec2f(NEAR_CLIP_DISTANCE, config.camera_height_meters * 2 + FAR_CLIP_BUFFER)
         )
 
         # Create render product sized to a single tile
@@ -191,14 +205,14 @@ class OrthoMapCapture:
         if self._rgb_annotator is not None:
             try:
                 self._rgb_annotator.detach()
-            except Exception:
-                pass
+            except (RuntimeError, AttributeError) as exc:
+                carb.log_warn(f"Failed to detach RGB annotator during teardown: {exc}")
             self._rgb_annotator = None
 
         if self._render_product is not None:
             try:
                 self._render_product.destroy()
-            except Exception:
-                pass
+            except (RuntimeError, AttributeError) as exc:
+                carb.log_warn(f"Failed to destroy render product during teardown: {exc}")
             self._render_product = None
 

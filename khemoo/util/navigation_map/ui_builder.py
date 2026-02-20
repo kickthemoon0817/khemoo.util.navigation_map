@@ -33,13 +33,14 @@ class NavigationMapUIBuilder:
 
     def __init__(self) -> None:
         self._models: dict[str, ui.AbstractValueModel] = {}
-        self._prev_origin: list[float] = [0.0, 0.0]
-        self._lower_bound: list[float] = [-1.0, -1.0]
-        self._upper_bound: list[float] = [1.0, 1.0]
+        self._prev_origin: tuple[float, float] = (0.0, 0.0)
+        self._lower_bound: tuple[float, float] = (-1.0, -1.0)
+        self._upper_bound: tuple[float, float] = (1.0, 1.0)
         self._wait_bound_update: bool = False
         self._bound_update_case: int = 0
         self._exclude_prim_paths: list[str] = []
         self._exclude_list_container: ui.VStack | None = None
+        self._om: object | None = None
 
     @property
     def models(self) -> dict[str, ui.AbstractValueModel]:
@@ -49,6 +50,7 @@ class NavigationMapUIBuilder:
     def build(
         self,
         frame: ui.Frame,
+        omap_interface: object | None,
         on_create_camera: Callable[[], None],
         on_capture_ortho: Callable[[], None],
         on_generate_omap: Callable[[], None],
@@ -58,10 +60,12 @@ class NavigationMapUIBuilder:
 
         Args:
             frame: The parent UI frame to build widgets into.
+            omap_interface: The OccupancyMap singleton for viewport visualization.
             on_create_camera: Callback for the "Create Camera" button.
             on_capture_ortho: Callback for the "Capture Orthographic Map" button.
             on_generate_omap: Callback for the "Generate Occupancy Map" button.
         """
+        self._om = omap_interface
         with frame:
             with ui.VStack(spacing=5, height=0, style=get_style()):
                 self._build_area_section()
@@ -231,6 +235,7 @@ class NavigationMapUIBuilder:
                     format="%.3f",
                     tooltip="Cell size in stage units for occupancy map resolution",
                 )
+                self._models["cell_size"].add_value_changed_fn(self._on_cell_size_changed)
 
     def _build_ortho_section(self) -> None:
         """Build the Orthographic Settings collapsable frame."""
@@ -240,7 +245,7 @@ class NavigationMapUIBuilder:
                     "Z Height", default_val=50.0, tooltip="Camera height above the scene",
                 )
                 self._models["meters_per_pixel"] = float_builder(
-                    "Meters per Pixel", default_val=0.01,
+                    "Meters per Pixel", default_val=0.05,
                     tooltip="Meters per pixel for calculating image resolution",
                 )
                 self._models["camera_path"] = str_builder(
@@ -381,18 +386,36 @@ class NavigationMapUIBuilder:
 
         if self._wait_bound_update:
             if self._bound_update_case == 0:
-                self._lower_bound[0] = lb_x
+                self._lower_bound = (lb_x, self._lower_bound[1])
             elif self._bound_update_case == 1:
-                self._lower_bound[1] = lb_y
+                self._lower_bound = (self._lower_bound[0], lb_y)
             elif self._bound_update_case == 2:
-                self._upper_bound[0] = ub_x
+                self._upper_bound = (ub_x, self._upper_bound[1])
             elif self._bound_update_case == 3:
-                self._upper_bound[1] = ub_y
+                self._upper_bound = (self._upper_bound[0], ub_y)
         else:
-            self._lower_bound[0] = lb_x
-            self._lower_bound[1] = lb_y
-            self._upper_bound[0] = ub_x
-            self._upper_bound[1] = ub_y
+            self._lower_bound = (lb_x, lb_y)
+            self._upper_bound = (ub_x, ub_y)
+
+        self._update_viewport_visualization()
+
+    def _on_cell_size_changed(self, _value: float) -> None:
+        """Sync cell size to the omap interface for viewport grid rendering."""
+        if self._om is not None:
+            self._om.set_cell_size(self._models["cell_size"].get_value_as_float())
+
+    def _update_viewport_visualization(self) -> None:
+        """
+        Push the current origin / bounds to the omap singleton so the
+        bounding-box, grid and coordinate axes are drawn in the viewport.
+        """
+        if self._om is None:
+            return
+        origin = self.get_origin()
+        lower = self.get_lower_bound()
+        upper = self.get_upper_bound()
+        self._om.set_transform(origin, lower, upper)
+        self._om.update()
 
     def _on_center_selection(self) -> None:
         """Center the origin on the selected prims and adjust bounds to match."""
@@ -425,7 +448,7 @@ class NavigationMapUIBuilder:
 
     def _calculate_bounds(
         self, origin_calc: bool, stationary_bounds: bool,
-    ) -> list[float] | tuple[list[float], list[float]]:
+    ) -> tuple[float, float] | tuple[tuple[float, float], tuple[float, float]]:
         """
         Compute origin or bounds from the current prim selection.
 
@@ -434,23 +457,23 @@ class NavigationMapUIBuilder:
             stationary_bounds: If True, adjust bounds relative to origin shift.
 
         Returns:
-            Origin as [x, y] when origin_calc is True, otherwise a tuple
-            of (lower_bound, upper_bound) each as [x, y].
+            Origin as (x, y) when origin_calc is True, otherwise a tuple
+            of (lower_bound, upper_bound) each as (x, y).
         """
-        origin_xy = [
+        origin_xy: tuple[float, float] = (
             self._models["origin"][0].get_value_as_float(),
             self._models["origin"][1].get_value_as_float(),
-        ]
+        )
 
         if not origin_calc and stationary_bounds:
-            lower = [
+            lower: tuple[float, float] = (
                 self._lower_bound[0] + self._prev_origin[0] - origin_xy[0],
                 self._lower_bound[1] + self._prev_origin[1] - origin_xy[1],
-            ]
-            upper = [
+            )
+            upper: tuple[float, float] = (
                 self._upper_bound[0] + self._prev_origin[0] - origin_xy[0],
                 self._upper_bound[1] + self._prev_origin[1] - origin_xy[1],
-            ]
+            )
             return lower, upper
 
         selected_paths = omni.usd.get_context().get_selection().get_selected_prim_paths()
@@ -468,15 +491,15 @@ class NavigationMapUIBuilder:
 
             if origin_calc:
                 mid = box_range.GetMidpoint()
-                self._prev_origin = list(origin_xy)
-                return [mid[0], mid[1]]
+                self._prev_origin = origin_xy
+                return (mid[0], mid[1])
 
             min_pt = box_range.GetMin()
             max_pt = box_range.GetMax()
-            lower = [min_pt[0] - origin_xy[0], min_pt[1] - origin_xy[1]]
-            upper = [max_pt[0] - origin_xy[0], max_pt[1] - origin_xy[1]]
+            lower = (min_pt[0] - origin_xy[0], min_pt[1] - origin_xy[1])
+            upper = (max_pt[0] - origin_xy[0], max_pt[1] - origin_xy[1])
             return lower, upper
 
         if origin_calc:
-            return [0.0, 0.0]
-        return [0.0, 0.0], [0.0, 0.0]
+            return (0.0, 0.0)
+        return (0.0, 0.0), (0.0, 0.0)

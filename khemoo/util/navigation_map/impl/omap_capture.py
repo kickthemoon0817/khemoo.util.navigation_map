@@ -21,6 +21,12 @@ from pxr import Sdf, Usd, UsdGeom, UsdPhysics
 
 from .omap_config import OmapConfig
 
+# Cell encoding values passed to _omap.Generator.update_settings().
+# These define what numeric value represents each cell state in the output buffer.
+OMAP_OCCUPIED_VALUE: int = 4
+OMAP_FREE_VALUE: int = 5
+OMAP_UNKNOWN_VALUE: int = 6
+
 
 class OmapCapture:
     """
@@ -114,29 +120,31 @@ class OmapCapture:
             await app.next_update_async()
 
         timeline.play()
-        for _ in range(5):
+        try:
+            for _ in range(5):
+                await app.next_update_async()
+
+            context = omni.usd.get_context()
+            physx_interface = omni.physx.get_physx_interface()
+            self._generator = _omap.Generator(physx_interface, context.get_stage_id())
+            self._generator.update_settings(
+                config.cell_size, OMAP_OCCUPIED_VALUE, OMAP_FREE_VALUE, OMAP_UNKNOWN_VALUE,
+            )
+            self._generator.set_transform(
+                config.origin, config.lower_bound, config.upper_bound,
+            )
+
+            await app.next_update_async()
+            self._generator.generate2d()
             await app.next_update_async()
 
-        context = omni.usd.get_context()
-        physx_interface = omni.physx.get_physx_interface()
-        self._generator = _omap.Generator(physx_interface, context.get_stage_id())
-        self._generator.update_settings(config.cell_size, 1.0, 0.0, 0.5)
-        self._generator.set_transform(
-            config.origin, config.lower_bound, config.upper_bound,
-        )
-
-        await app.next_update_async()
-        self._generator.generate2d()
-        await app.next_update_async()
-
-        slope_free_mask: Optional[np.ndarray] = None
-        if config.max_traversable_slope_degrees > 0.0 and self._generator is not None:
-            slope_free_mask = self._compute_slope_free_mask(config)
-
-        timeline.stop()
-
-        if layer is not None and stage is not None:
-            stage.GetSessionLayer().subLayerPaths.remove(layer.identifier)
+            slope_free_mask: Optional[np.ndarray] = None
+            if config.max_traversable_slope_degrees > 0.0 and self._generator is not None:
+                slope_free_mask = self._compute_slope_free_mask(config)
+        finally:
+            timeline.stop()
+            if layer is not None and stage is not None:
+                stage.GetSessionLayer().subLayerPaths.remove(layer.identifier)
 
         return self._save_results(config, slope_free_mask=slope_free_mask)
 
@@ -213,28 +221,31 @@ class OmapCapture:
                         UsdPhysics.MeshCollisionAPI.Apply(prim)
 
         timeline.play()
-        for _ in range(5):
+        try:
+            for _ in range(5):
+                await app.next_update_async()
+
+            context = omni.usd.get_context()
+            physx_interface = omni.physx.get_physx_interface()
+            self._generator = _omap.Generator(physx_interface, context.get_stage_id())
+            self._generator.update_settings(
+                config.cell_size, OMAP_OCCUPIED_VALUE, OMAP_FREE_VALUE, OMAP_UNKNOWN_VALUE,
+            )
+            self._generator.set_transform(
+                config.origin, config.lower_bound, config.upper_bound,
+            )
+
+            await app.next_update_async()
+            self._generator.generate2d()
             await app.next_update_async()
 
-        context = omni.usd.get_context()
-        physx_interface = omni.physx.get_physx_interface()
-        self._generator = _omap.Generator(physx_interface, context.get_stage_id())
-        self._generator.update_settings(config.cell_size, 1.0, 0.0, 0.5)
-        self._generator.set_transform(
-            config.origin, config.lower_bound, config.upper_bound,
-        )
+            slope_free_mask: Optional[np.ndarray] = None
+            if config.max_traversable_slope_degrees > 0.0 and self._generator is not None:
+                slope_free_mask = self._compute_slope_free_mask(config)
+        finally:
+            timeline.stop()
+            session.subLayerPaths.remove(layer.identifier)
 
-        await app.next_update_async()
-        self._generator.generate2d()
-        await app.next_update_async()
-
-        slope_free_mask: Optional[np.ndarray] = None
-        if config.max_traversable_slope_degrees > 0.0 and self._generator is not None:
-            slope_free_mask = self._compute_slope_free_mask(config)
-
-        timeline.stop()
-
-        session.subLayerPaths.remove(layer.identifier)
         return self._save_results(config, slope_free_mask=slope_free_mask)
 
     def _save_results(
@@ -245,9 +256,11 @@ class OmapCapture:
         """
         Save the generated occupancy map as a PNG image and a ROS YAML file.
 
-        The ROS YAML origin uses the **input** origin (not the grid-aligned
-        computed origin) so that downstream consumers see the exact coordinates
-        the user specified.
+        The image is rotated 180° to match the native Isaac Sim omap
+        extension default orientation.  The ROS YAML origin is computed
+        from the generator's actual grid bounds (``get_min_bound``) with a
+        half-cell offset, matching the native ``compute_coordinates``
+        formula at 180° rotation.
 
         When *slope_free_mask* is provided, occupied cells marked ``True``
         in the mask are reclassified as free space before saving.
@@ -274,12 +287,12 @@ class OmapCapture:
         unknown_color = (127, 127, 127, 255)
         image_data = np.full((dims[1], dims[0], 4), unknown_color, dtype=np.uint8)
 
-        flat_buffer = np.array(buffer, dtype=np.float32)
+        flat_buffer = np.asarray(buffer, dtype=np.float32)
         if slope_free_mask is not None:
-            flat_buffer[slope_free_mask] = 0.0
+            flat_buffer[slope_free_mask] = OMAP_FREE_VALUE
 
-        occupied_mask = flat_buffer == 1.0
-        free_mask = flat_buffer == 0.0
+        occupied_mask = flat_buffer == OMAP_OCCUPIED_VALUE
+        free_mask = flat_buffer == OMAP_FREE_VALUE
         image_flat = image_data.reshape(-1, 4)
         image_flat[occupied_mask] = occupied_color
         image_flat[free_mask] = freespace_color
@@ -293,10 +306,15 @@ class OmapCapture:
         img = img.rotate(-180, expand=True)
         img.save(png_filepath)
 
-        # ROS YAML — use input origin for exact user-specified coordinates
+        # ROS YAML — origin from generator actual bounds, matching native
+        # omap extension default (180° rotation).  At 180° the ROS origin
+        # corresponds to compute_coordinates "top_right" which becomes
+        # "bottom_left" after the corner swap: (min_b + half_cell).
         scale_to_meters = 1.0 / get_stage_units()
-        origin_x = config.origin[0] + config.lower_bound[0]
-        origin_y = config.origin[1] + config.lower_bound[1]
+        min_b = self._generator.get_min_bound()
+        half_w = config.cell_size * 0.5
+        origin_x = min_b[0] + half_w
+        origin_y = min_b[1] + half_w
 
         yaml_filename = f"omap_{timestamp}.yaml"
         yaml_filepath = os.path.join(config.output_directory, yaml_filename)
@@ -346,7 +364,7 @@ class OmapCapture:
             entries mark occupied cells that should become free.
         """
         dims = self._generator.get_dimensions()
-        buffer = np.array(self._generator.get_buffer(), dtype=np.float32)
+        buffer = np.asarray(self._generator.get_buffer(), dtype=np.float32)
         min_bound = self._generator.get_min_bound()
         lower_bound_z: float = config.origin[2] + config.lower_bound[2]
         upper_bound_z: float = config.origin[2] + config.upper_bound[2]
@@ -364,14 +382,18 @@ class OmapCapture:
         up_ray_distance: float = upper_bound_z - up_ray_start_z + 10.0
         thickness_threshold: float = cell_size * 5.0
 
-        occupied_indices = np.where(buffer == 1.0)[0]
-        reclassified_count: int = 0
-        for idx in occupied_indices:
-            x_cell: int = int(idx % dims[0])
-            y_cell: int = int(idx // dims[0])
+        occupied_indices = np.where(buffer == OMAP_OCCUPIED_VALUE)[0]
 
-            cell_x: float = min_bound[0] + (x_cell + 0.5) * cell_size
-            cell_y: float = min_bound[1] + (y_cell + 0.5) * cell_size
+        # Vectorize cell → world coordinate mapping outside the raycast loop.
+        x_cells = (occupied_indices % dims[0]).astype(np.intp)
+        y_cells = (occupied_indices // dims[0]).astype(np.intp)
+        cell_xs: np.ndarray = min_bound[0] + (x_cells + 0.5) * cell_size
+        cell_ys: np.ndarray = min_bound[1] + (y_cells + 0.5) * cell_size
+
+        reclassified_count: int = 0
+        for i, idx in enumerate(occupied_indices):
+            cell_x: float = float(cell_xs[i])
+            cell_y: float = float(cell_ys[i])
 
             # Stage 1: downward ray — slope check.
             down_origin = carb.Float3(cell_x, cell_y, down_ray_start_z)
