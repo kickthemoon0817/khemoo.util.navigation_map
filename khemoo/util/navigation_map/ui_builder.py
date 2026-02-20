@@ -40,6 +40,7 @@ class NavigationMapUIBuilder:
         self._bound_update_case: int = 0
         self._exclude_prim_paths: list[str] = []
         self._exclude_list_container: ui.VStack | None = None
+        self._om: object | None = None
 
     @property
     def models(self) -> dict[str, ui.AbstractValueModel]:
@@ -49,6 +50,7 @@ class NavigationMapUIBuilder:
     def build(
         self,
         frame: ui.Frame,
+        omap_interface: object | None,
         on_create_camera: Callable[[], None],
         on_capture_ortho: Callable[[], None],
         on_generate_omap: Callable[[], None],
@@ -58,10 +60,12 @@ class NavigationMapUIBuilder:
 
         Args:
             frame: The parent UI frame to build widgets into.
+            omap_interface: The OccupancyMap singleton for viewport visualization.
             on_create_camera: Callback for the "Create Camera" button.
             on_capture_ortho: Callback for the "Capture Orthographic Map" button.
             on_generate_omap: Callback for the "Generate Occupancy Map" button.
         """
+        self._om = omap_interface
         with frame:
             with ui.VStack(spacing=5, height=0, style=get_style()):
                 self._build_area_section()
@@ -231,6 +235,7 @@ class NavigationMapUIBuilder:
                     format="%.3f",
                     tooltip="Cell size in stage units for occupancy map resolution",
                 )
+                self._models["cell_size"].add_value_changed_fn(self._on_cell_size_changed)
 
     def _build_ortho_section(self) -> None:
         """Build the Orthographic Settings collapsable frame."""
@@ -393,6 +398,26 @@ class NavigationMapUIBuilder:
             self._lower_bound[1] = lb_y
             self._upper_bound[0] = ub_x
             self._upper_bound[1] = ub_y
+
+        self._update_viewport_visualization()
+
+    def _on_cell_size_changed(self, _value: float) -> None:
+        """Sync cell size to the omap interface for viewport grid rendering."""
+        if self._om is not None:
+            self._om.set_cell_size(self._models["cell_size"].get_value_as_float())
+
+    def _update_viewport_visualization(self) -> None:
+        """
+        Push the current origin / bounds to the omap singleton so the
+        bounding-box, grid and coordinate axes are drawn in the viewport.
+        """
+        if self._om is None:
+            return
+        origin = self.get_origin()
+        lower = self.get_lower_bound()
+        upper = self.get_upper_bound()
+        self._om.set_transform(origin, lower, upper)
+        self._om.update()
 
     def _on_center_selection(self) -> None:
         """Center the origin on the selected prims and adjust bounds to match."""
