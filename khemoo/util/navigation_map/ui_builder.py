@@ -33,9 +33,9 @@ class NavigationMapUIBuilder:
 
     def __init__(self) -> None:
         self._models: dict[str, ui.AbstractValueModel] = {}
-        self._prev_origin: list[float] = [0.0, 0.0]
-        self._lower_bound: list[float] = [-1.0, -1.0]
-        self._upper_bound: list[float] = [1.0, 1.0]
+        self._prev_origin: tuple[float, float] = (0.0, 0.0)
+        self._lower_bound: tuple[float, float] = (-1.0, -1.0)
+        self._upper_bound: tuple[float, float] = (1.0, 1.0)
         self._wait_bound_update: bool = False
         self._bound_update_case: int = 0
         self._exclude_prim_paths: list[str] = []
@@ -386,18 +386,16 @@ class NavigationMapUIBuilder:
 
         if self._wait_bound_update:
             if self._bound_update_case == 0:
-                self._lower_bound[0] = lb_x
+                self._lower_bound = (lb_x, self._lower_bound[1])
             elif self._bound_update_case == 1:
-                self._lower_bound[1] = lb_y
+                self._lower_bound = (self._lower_bound[0], lb_y)
             elif self._bound_update_case == 2:
-                self._upper_bound[0] = ub_x
+                self._upper_bound = (ub_x, self._upper_bound[1])
             elif self._bound_update_case == 3:
-                self._upper_bound[1] = ub_y
+                self._upper_bound = (self._upper_bound[0], ub_y)
         else:
-            self._lower_bound[0] = lb_x
-            self._lower_bound[1] = lb_y
-            self._upper_bound[0] = ub_x
-            self._upper_bound[1] = ub_y
+            self._lower_bound = (lb_x, lb_y)
+            self._upper_bound = (ub_x, ub_y)
 
         self._update_viewport_visualization()
 
@@ -450,7 +448,7 @@ class NavigationMapUIBuilder:
 
     def _calculate_bounds(
         self, origin_calc: bool, stationary_bounds: bool,
-    ) -> list[float] | tuple[list[float], list[float]]:
+    ) -> tuple[float, float] | tuple[tuple[float, float], tuple[float, float]]:
         """
         Compute origin or bounds from the current prim selection.
 
@@ -459,23 +457,23 @@ class NavigationMapUIBuilder:
             stationary_bounds: If True, adjust bounds relative to origin shift.
 
         Returns:
-            Origin as [x, y] when origin_calc is True, otherwise a tuple
-            of (lower_bound, upper_bound) each as [x, y].
+            Origin as (x, y) when origin_calc is True, otherwise a tuple
+            of (lower_bound, upper_bound) each as (x, y).
         """
-        origin_xy = [
+        origin_xy: tuple[float, float] = (
             self._models["origin"][0].get_value_as_float(),
             self._models["origin"][1].get_value_as_float(),
-        ]
+        )
 
         if not origin_calc and stationary_bounds:
-            lower = [
+            lower: tuple[float, float] = (
                 self._lower_bound[0] + self._prev_origin[0] - origin_xy[0],
                 self._lower_bound[1] + self._prev_origin[1] - origin_xy[1],
-            ]
-            upper = [
+            )
+            upper: tuple[float, float] = (
                 self._upper_bound[0] + self._prev_origin[0] - origin_xy[0],
                 self._upper_bound[1] + self._prev_origin[1] - origin_xy[1],
-            ]
+            )
             return lower, upper
 
         selected_paths = omni.usd.get_context().get_selection().get_selected_prim_paths()
@@ -493,15 +491,15 @@ class NavigationMapUIBuilder:
 
             if origin_calc:
                 mid = box_range.GetMidpoint()
-                self._prev_origin = list(origin_xy)
-                return [mid[0], mid[1]]
+                self._prev_origin = origin_xy
+                return (mid[0], mid[1])
 
             min_pt = box_range.GetMin()
             max_pt = box_range.GetMax()
-            lower = [min_pt[0] - origin_xy[0], min_pt[1] - origin_xy[1]]
-            upper = [max_pt[0] - origin_xy[0], max_pt[1] - origin_xy[1]]
+            lower = (min_pt[0] - origin_xy[0], min_pt[1] - origin_xy[1])
+            upper = (max_pt[0] - origin_xy[0], max_pt[1] - origin_xy[1])
             return lower, upper
 
         if origin_calc:
-            return [0.0, 0.0]
-        return [0.0, 0.0], [0.0, 0.0]
+            return (0.0, 0.0)
+        return (0.0, 0.0), (0.0, 0.0)

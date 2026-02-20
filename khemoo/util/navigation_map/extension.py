@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import weakref
-from typing import Optional
+from typing import Any, Optional
 
 import carb
 import omni.ext
@@ -40,7 +40,7 @@ class NavigationMapExtension(omni.ext.IExt):
         self._menu_items: list[MenuItemDescription] = []
         self._capture_engine: Optional[OrthoMapCapture] = None
         self._omap_engine: Optional[OmapCapture] = None
-        self._om: Optional[object] = None
+        self._om: Any | None = None
         self._ui_builder: NavigationMapUIBuilder = NavigationMapUIBuilder()
 
     def on_startup(self, ext_id: str) -> None:
